@@ -24,6 +24,9 @@ use App\Repositories\DocumentRepositoryInterface;
 use App\Services\Search\SearchService;
 use App\Services\Search\SearchServiceInterface;
 
+use App\Services\Intent\ServiceIntent;
+use App\Services\Intent\ServiceIntentInterface;
+
 class AppServiceProvider extends ServiceProvider
 {
     /**
@@ -66,6 +69,10 @@ $this->app->bind(
     SearchService::class
 );
 
+$this->app->bind(
+    ServiceIntentInterface::class,
+    ServiceIntent::class
+);
 
 }
 

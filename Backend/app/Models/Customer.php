@@ -7,12 +7,13 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Customer extends Model
 {
-    protected $fillable = [
-        'name',
-        'phone',
-        'status',
-        'last_chat_at',
-    ];
+   protected $fillable = [
+    'name',
+    'wa_name',
+    'phone',
+    'status',
+    'last_chat_at'
+];
 
     protected $casts = [
         'last_chat_at' => 'datetime',

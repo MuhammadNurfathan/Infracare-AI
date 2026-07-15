@@ -14,55 +14,89 @@ class AIService implements AIServiceInterface
         $prompt = "
 Kamu adalah Customer Service perusahaan.
 
-Jawablah pertanyaan customer HANYA berdasarkan informasi berikut.
+Jawab HANYA berdasarkan informasi berikut.
 
-INFORMASI:
+========================
+INFORMASI
+========================
+
 $context
 
-PERTANYAAN:
+========================
+PERTANYAAN
+========================
+
 $question
 
-ATURAN:
+========================
+ATURAN
+========================
+
 - Jangan mengarang.
-- Jika jawabannya tidak ada di informasi di atas, jawab:
-'Mohon maaf, informasi tersebut belum tersedia pada manual perusahaan.'
-- Jawaban maksimal 5 kalimat.
+- Jangan memakai pengetahuan lain.
+- Jika tidak ada jawabannya, balas:
+Mohon maaf, informasi tersebut belum tersedia pada manual perusahaan.
+- Maksimal 5 kalimat.
 ";
 
         try {
 
-            $response = Http::withHeaders([
-    'Authorization' => 'Bearer ' . env('OPENROUTER_API_KEY'),
-    'Content-Type'  => 'application/json',
-    'HTTP-Referer'  => env('APP_URL'),
-    'X-Title'       => env('APP_NAME'),
-])->post(
-    'https://openrouter.ai/api/v1/chat/completions',
-    [
-        'model' => 'tencent/hy3:free',
+            $response = Http::timeout(60)
+                ->connectTimeout(10)
+                ->withHeaders([
+                    'Authorization' => 'Bearer ' . env('OPENROUTER_API_KEY'),
+                    'HTTP-Referer'  => env('APP_URL'),
+                    'X-Title'       => env('APP_NAME'),
+                    'Content-Type'  => 'application/json',
+                ])
+                ->post(
+                    'https://openrouter.ai/api/v1/chat/completions',
+                    [
 
-        'messages' => [
-            [
-                'role' => 'user',
-                'content' => $prompt
-            ]
-        ]
-    ]
-);
+                        // GANTI MODEL
+                        'model' => 'nvidia/nemotron-3-ultra-550b-a55b:free',
+
+                        'messages' => [
+
+                            [
+                                'role' => 'system',
+                                'content' => 'Kamu adalah Customer Service perusahaan.'
+                            ],
+
+                            [
+                                'role' => 'user',
+                                'content' => $prompt
+                            ]
+
+                        ],
+
+                        'temperature' => 0.2,
+                        'max_tokens' => 300
+
+                    ]
+                );
 
             if (!$response->successful()) {
-    return json_encode($response->json(), JSON_PRETTY_PRINT);
-}
+                return "OpenRouter Error : ".$response->body();
+            }
 
-return data_get(
-    $response->json(),
-    'choices.0.message.content',
-    'AI tidak memberikan jawaban.'
-);
+            $json = $response->json();
+
+            // Ambil jawaban AI
+            $reply = data_get(
+                $json,
+                'choices.0.message.content'
+            );
+
+            if (!empty($reply)) {
+                return trim($reply);
+            }
+
+            return "AI tidak memberikan jawaban.";
 
         } catch (\Throwable $e) {
 
-            return $e->getMessage();
+            return "Server AI Error : ".$e->getMessage();
 
         }
     }

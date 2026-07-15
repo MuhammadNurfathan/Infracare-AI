@@ -8,12 +8,14 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 class Message extends Model
 {
     protected $fillable = [
-        'conversation_id',
-        'sender',
-        'message',
-        'confidence',
-        'is_read',
-    ];
+    'conversation_id',
+    'sender',
+    'type',
+    'message',
+    'attachment',
+    'confidence',
+    'is_read'
+];
 
     protected $casts = [
         'confidence' => 'float',

@@ -15,16 +15,22 @@ class ChatController extends Controller
     public function chat(Request $request)
     {
         $request->validate([
-            'message' => 'required|string'
+            'phone' => 'required|string',
+            'name' => 'nullable|string',
+            'message' => 'required|string',
+            
         ]);
 
-        $reply = $this->chatService->handle(
-            $request->message
+        $reply = $this->chatService->receiveMessage(
+            $request->only([
+                'phone',
+                'name',
+                'message'
+            ])
         );
 
         return response()->json([
             'success' => true,
-            'message' => $request->message,
             'reply' => $reply
         ]);
     }

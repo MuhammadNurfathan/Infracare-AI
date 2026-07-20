@@ -163,6 +163,14 @@ function isEndSessionText(text) {
     return endKeywords.some((keyword) => normalized.includes(keyword));
 }
 
+function getSessionClosedReply(text) {
+    const isId = detectLanguage(text) === 'id';
+
+    return isId
+        ? 'Terima kasih atas pertanyaannya. Semoga membantu. Bot kembali aktif.'
+        : 'Thank you for your question. I hope it was helpful. The bot is active again.';
+}
+
 function markTopicMenuShown(phone) {
     const state = getCustomerState(phone);
     state.menuShown = true;
@@ -173,12 +181,18 @@ function markEscalationMenuShown(phone) {
     state.escalationMenuShown = true;
 }
 
-async function sendEscalationMenu(sock, jid, text) {
+async function sendEscalationMenu(sock, jid, phone, text) {
+    const state = getCustomerState(phone);
+    if (state.escalationMenuShown) {
+        return;
+    }
+
     const isId = detectLanguage(text) === 'id';
     const prompt = isId
         ? 'Saya belum yakin bisa membantu sepenuhnya.\nPilih opsi berikut:\n1) Chat Admin\n2) Kirim Email ke eyre.hypercon@gmail.com\n\nKalau pilih nomor 2, cukup balas dengan kata "email" atau pilih nomor 2.'
         : 'I’m not fully sure I can help with this yet.\nChoose one option:\n1) Chat Admin\n2) Send Email to eyre.hypercon@gmail.com\n\nIf you choose option 2, just reply with "email" or select 2.';
 
+    state.escalationMenuShown = true;
     await sock.sendMessage(jid, { text: prompt }).catch(() => {});
 }
 
@@ -213,23 +227,26 @@ async function tryEndAdminSession(sock, jid, phone, text) {
         return false;
     }
 
-    const targetPhone = (text.match(/\b\d{8,15}\b/g) || [])[0] || lastEscalatedSession?.phone || null;
+    const targetPhone = (text.match(/\b\d{8,15}\b/g) || [])[0] || lastEscalatedSession?.phone || phone || null;
 
     if (!targetPhone && !lastEscalatedSession) {
         return false;
     }
 
     const targetState = targetPhone ? getCustomerState(targetPhone) : null;
+    const targetJid = (targetState?.sessionJid || lastEscalatedSession?.jid || jid || "").trim();
 
     if (targetState) {
         targetState.botPaused = false;
         targetState.escalatedToAdmin = false;
-        targetState.sessionJid = targetState.sessionJid || lastEscalatedSession?.jid || "";
+        targetState.sessionJid = "";
+        targetState.escalationMenuShown = false;
+        targetState.menuShown = false;
     }
 
-    if (lastEscalatedSession?.jid) {
-        await sock.sendMessage(lastEscalatedSession.jid, {
-            text: getGreetingReply('halo')
+    if (targetJid) {
+        await sock.sendMessage(targetJid, {
+            text: getSessionClosedReply(text)
         }).catch(() => {});
     }
 
@@ -431,11 +448,6 @@ async function startBot() {
             }
 
             if (state.botPaused && !isEndSessionText(text)) {
-                await sock.sendMessage(jid, {
-                    text: detectLanguage(text) === 'id'
-                        ? 'Sesi sedang ditangani Admin. Balas dengan kata "akhiri" jika sesi sudah selesai.'
-                        : 'The admin session is currently active. Reply with "akhiri" if the session has finished.'
-                }).catch(() => {});
                 return;
             }
 
@@ -475,8 +487,7 @@ async function startBot() {
                 console.log(err?.message || err);
                 await sock.sendPresenceUpdate("paused", jid).catch(() => {});
                 await sendFallbackReply(sock, jid, text);
-                await sendEscalationMenu(sock, jid, text);
-                markEscalationMenuShown(phone);
+                await sendEscalationMenu(sock, jid, phone, text);
                 return;
             }
 
@@ -494,8 +505,7 @@ async function startBot() {
             const shouldEscalate = shouldOfferEscalationMenu(text, response?.data);
 
             if (shouldEscalate && shouldShowEscalationMenu(text, phone)) {
-                await sendEscalationMenu(sock, jid, text);
-                markEscalationMenuShown(phone);
+                await sendEscalationMenu(sock, jid, phone, text);
             }
 
             console.log("✅ Reply berhasil dikirim");

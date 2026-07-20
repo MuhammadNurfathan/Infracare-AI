@@ -270,17 +270,46 @@ class ChatService implements ChatServiceInterface
             || str_contains($normalized, 'kata sandi')
             || str_contains($normalized, 'refresh')
             || str_contains($normalized, 'reset')
+            || str_contains($normalized, 'restart')
+            || str_contains($normalized, 'mulai ulang')
             || str_contains($normalized, 'managed account')
             || str_contains($normalized, 'management password');
+
+        $reply = trim($reply);
+        $reply = preg_replace('/\r\n|\r/', "\n", $reply) ?? $reply;
+        $reply = preg_replace('/\n\s*\n/', "\n", $reply) ?? $reply;
+        $reply = preg_replace('/(?<=\.)\s*(?=\d)/u', "\n", $reply) ?? $reply;
+        $reply = preg_replace('/\n{3,}/', "\n\n", $reply) ?? $reply;
+
+        $forbiddenPhrases = [
+            'chunk',
+            'chunks',
+            'section',
+            'sections',
+            'i looked',
+            'i see information about',
+            'let me look',
+            'looking at the chunks',
+            'looking at the context',
+            'the context mentions',
+            'from the context',
+            'from the provided context',
+            'based on the context',
+        ];
+
+        foreach ($forbiddenPhrases as $phrase) {
+            $reply = str_ireplace($phrase, '', $reply);
+        }
+
+        $reply = preg_replace('/\s{2,}/u', ' ', $reply) ?? $reply;
+        $reply = preg_replace('/\n{2,}/', "\n\n", $reply) ?? $reply;
+        $reply = trim($reply);
 
         if (!$isProcedural) {
             return $reply;
         }
 
-        $reply = preg_replace('/\n\s*\n/', "\n", $reply) ?? $reply;
-        $reply = preg_replace('/(?<=\.)\s*(?=\d)/u', "\n", $reply) ?? $reply;
-
-        if (preg_match('/^to refresh|^untuk refresh|^untuk mereset|^untuk mengubah/i', $reply) === 0) {
+        if (preg_match('/^(berikut langkah|langkah-langkah|langkah|untuk|to )/i', $reply) === 0) {
             $prefix = "Berikut langkah yang bisa Anda ikuti:\n\n";
             $reply = $prefix . $reply;
         }

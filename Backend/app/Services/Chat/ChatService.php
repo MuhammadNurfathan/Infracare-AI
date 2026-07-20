@@ -146,17 +146,25 @@ class ChatService implements ChatServiceInterface
             $reply = $this->buildContextReply($message, $contextChunks);
         }
 
+        $reply = $this->cleanupChunkNoise($reply);
         $reply = $this->formatReadableReply($reply);
         $reply = $this->improveUserFriendlyLayout($reply, $message);
 
         $confidence = 0;
         $shouldEscalate = false;
 
-        if ($hasMeaningfulContext && !$fallbackLike) {
+        $isClearlyUnsupported = $fallbackLike
+            || $contextChunks->isEmpty()
+            || $bestScore < 15
+            || str_contains(mb_strtolower($reply), 'belum tersedia')
+            || str_contains(mb_strtolower($reply), 'tidak tersedia pada manual')
+            || str_contains(mb_strtolower($reply), 'informasi yang anda butuhkan belum tersedia');
+
+        if ($hasMeaningfulContext && !$fallbackLike && !$isClearlyUnsupported) {
             $confidence = 78;
-        } elseif ($contextChunks->isNotEmpty() && $bestScore >= 10) {
+        } elseif ($contextChunks->isNotEmpty() && $bestScore >= 10 && !$isClearlyUnsupported) {
             $confidence = 55;
-            $shouldEscalate = true;
+            $shouldEscalate = false;
         } else {
             $confidence = 20;
             $shouldEscalate = true;
@@ -167,10 +175,14 @@ class ChatService implements ChatServiceInterface
             $confidence = 35;
         }
 
-        if ($contextChunks->isEmpty() || $bestScore < 15) {
+        if ($isClearlyUnsupported && $contextChunks->isEmpty()) {
             $reply = $this->buildEscalationReply($message);
             $shouldEscalate = true;
             $confidence = 40;
+        } elseif ($isClearlyUnsupported && $contextChunks->isNotEmpty()) {
+            $reply = $this->buildContextReply($message, $contextChunks);
+            $shouldEscalate = false;
+            $confidence = 60;
         }
 
         Message::create([
@@ -238,6 +250,25 @@ class ChatService implements ChatServiceInterface
         $reply = preg_replace('/\s+/', ' ', $reply);
 
         return mb_substr($reply, 0, 900);
+    }
+
+    private function cleanupChunkNoise(string $reply): string
+    {
+        $reply = trim($reply);
+        $reply = str_replace(["\r\n", "\r"], "\n", $reply);
+
+        $reply = preg_replace('/\[Chunk\s*\d+\].*?/i', '', $reply) ?? $reply;
+        $reply = preg_replace('/\bChunk\s*\d+\b/i', '', $reply) ?? $reply;
+        $reply = preg_replace('/\s+/', ' ', $reply) ?? $reply;
+        $reply = preg_replace('/\n{3,}/', "\n\n", $reply) ?? $reply;
+        $reply = preg_replace('/\n\s+/', "\n", $reply) ?? $reply;
+        $reply = preg_replace('/\s+([,.!?;:])/u', '$1', $reply) ?? $reply;
+        $reply = str_replace(["• ", "- "], "", $reply);
+        $reply = preg_replace('/(?<!\n)\s*(?=\d+\.)/u', "\n", $reply) ?? $reply;
+        $reply = preg_replace('/(?<!\n)\s*(?=Step\s+\d+)/i', "\n", $reply) ?? $reply;
+        $reply = preg_replace('/\n{2,}/', "\n\n", $reply) ?? $reply;
+
+        return trim($reply);
     }
 
     private function formatReadableReply(string $reply): string
@@ -356,22 +387,53 @@ class ChatService implements ChatServiceInterface
     private function detectLanguage(string $text): string
     {
         $text = mb_strtolower(trim($text));
-        $englishWords = ['hello', 'hi', 'thank', 'thanks', 'please', 'support', 'admin', 'email', 'guide', 'step'];
-        $indonesianWords = ['halo', 'hai', 'terima kasih', 'makasih', 'tolong', 'mohon', 'bantu', 'admin', 'email', 'langkah', 'cara'];
 
-        $enScore = 0;
+        if ($text === '') {
+            return 'indonesia';
+        }
+
+        $indonesianMarkers = [
+            'halo', 'hai', 'terima kasih', 'makasih', 'tolong', 'mohon', 'bantu', 'bagaimana',
+            'cara', 'apa', 'apakah', 'kenapa', 'mengapa', 'dimana', 'kapan', 'siapa', 'saya',
+            'anda', 'kami', 'silakan', 'langkah', 'gunakan', 'pakai', 'login', 'akun', 'server',
+            'jaringan', 'kirim', 'email', 'admin', 'manual', 'perlu', 'bisakah', 'gimana', 'buat',
+            'terus', 'sudah', 'belum', 'itu', 'ini', 'aja', 'dong', 'ya', 'sih'
+        ];
+
+        $englishMarkers = [
+            'hello', 'hi', 'thank you', 'thanks', 'please', 'how', 'what', 'where', 'when', 'who',
+            'why', 'can you', 'guide', 'step', 'steps', 'support', 'contact', 'admin', 'email',
+            'login', 'account', 'server', 'network', 'vpn', 'help', 'please wait'
+        ];
+
         $idScore = 0;
+        $enScore = 0;
 
-        foreach ($englishWords as $word) {
+        foreach ($indonesianMarkers as $word) {
+            if (str_contains($text, $word)) {
+                $idScore++;
+            }
+        }
+
+        foreach ($englishMarkers as $word) {
             if (str_contains($text, $word)) {
                 $enScore++;
             }
         }
 
-        foreach ($indonesianWords as $word) {
-            if (str_contains($text, $word)) {
-                $idScore++;
-            }
+        $hasIndonesianWord = preg_match('/[\p{Script=Latin}]+(?:\s|$)/u', $text) === 1 && preg_match('/[\x{00C0}-\x{024F}\x{1E00}-\x{1EFF}]/u', $text) === 1;
+        $hasEnglishWord = preg_match('/\b(?:the|and|for|with|this|that|please|thanks|how|what|where|when|who|why|can|you|your|contact|support|admin|email|server|login|account|network|vpn)\b/i', $text) === 1;
+
+        if ($idScore > 0 && $enScore === 0) {
+            return 'indonesia';
+        }
+
+        if ($hasIndonesianWord && $idScore >= $enScore) {
+            return 'indonesia';
+        }
+
+        if ($hasEnglishWord && $enScore > $idScore) {
+            return 'english';
         }
 
         return $idScore >= $enScore ? 'indonesia' : 'english';

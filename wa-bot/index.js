@@ -53,15 +53,26 @@
     }
 
     function isGreetingLike(text) {
-        const normalized = normalizeText(text);
-        const greetingKeywords = [
-            'halo', 'hai', 'hello', 'hi', 'selamat pagi', 'selamat siang',
-            'selamat sore', 'selamat malam', 'assalamualaikum', 'salam',
-            'terima kasih', 'makasih', 'thanks', 'thank you'
-        ];
+    const normalized = normalizeText(text);
 
-        return greetingKeywords.some((keyword) => normalized.includes(keyword));
-    }
+    const greetingKeywords = [
+        'halo',
+        'hai',
+        'hello',
+        'hi',
+        'selamat pagi',
+        'selamat siang',
+        'selamat sore',
+        'selamat malam',
+        'assalamualaikum',
+        'salam'
+    ];
+
+    // hanya cocok jika pesan BENAR-BENAR greeting
+    return greetingKeywords.some((keyword) =>
+        normalized === keyword || normalized.startsWith(keyword + ' ')
+    );
+}
 
     function isDirectAdminRequest(text) {
         const normalized = normalizeText(text);

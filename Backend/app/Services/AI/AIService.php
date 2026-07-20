@@ -2,102 +2,303 @@
 
 namespace App\Services\AI;
 
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 
 class AIService implements AIServiceInterface
 {
     public function generateResponse(
         string $question,
         string $context
-    ): string
-    {
-        $prompt = "
-Kamu adalah Customer Service perusahaan.
+    ): string {
 
-Jawab HANYA berdasarkan informasi berikut.
+        $start = microtime(true);
 
-========================
-INFORMASI
-========================
+        $context = mb_substr(trim($context), 0, 22000);
 
-$context
+        $language = $this->detectLanguage($question);
 
-========================
-PERTANYAAN
-========================
+        $languageInstruction = $language === 'indonesia'
+            ? 'Reply in Indonesian.'
+            : 'Reply in English.';
 
-$question
+        $fallbackMessage = $language === 'indonesia'
+            ? 'Informasi yang tersedia belum cukup untuk memberikan langkah rinci, tetapi saya akan rangkum poin-poin yang paling relevan dari konteks yang ada.'
+            : 'The available information is not detailed enough to provide full step-by-step instructions, but I will summarize the most relevant points from the context.';
 
-========================
-ATURAN
-========================
+        $prompt = <<<PROMPT
+You are a professional customer service assistant of PT Siber Sinergi Teknologi.
 
-- Jangan mengarang.
-- Jangan memakai pengetahuan lain.
-- Jika tidak ada jawabannya, balas:
-Mohon maaf, informasi tersebut belum tersedia pada manual perusahaan.
-- Maksimal 5 kalimat.
-";
+Rules:
 
-        try {
+- Answer ONLY using INFORMATION from the provided context.
+- Never guess.
+- Never use outside knowledge.
+- Never mention AI, ChatGPT, PDF, documents, manuals, Laravel, backend ticketing, thesis or final project.
+- {$languageInstruction}
+- Prefer a rich, helpful answer that uses as much relevant context as possible.
+- If the information is spread across multiple chunks, combine them into one coherent and complete answer.
+- Write in simple, easy-to-understand language and keep the layout tidy.
+- Make the response feel natural and helpful, like a support assistant, not like a copied PDF excerpt.
+- Use short paragraphs, bullet points, and numbered steps where appropriate.
+- If the customer asks for steps, answer using numbered steps and put each step on its own line.
+- If the context contains section references or partial instructions, summarize the relevant part clearly and helpfully instead of telling the user to read the manual.
+- If the information is incomplete, still provide the most helpful answer available from the context instead of giving up immediately.
+- Do not say that the user must read the manual book or refer to the manual when a useful summary can be extracted from the context.
+- If the context is completely unrelated or empty, use the fallback line below.
+- For procedural questions, include the most relevant steps even if they are not fully complete, rather than stopping early.
+- If the user asks in Indonesian, answer in Indonesian. If the user asks in English, answer in English.
+- Prefer a polished response with a clear intro sentence, a concise explanation, and clean step-by-step structure.
+- For password or management-account questions, clearly separate the normal case and the third-party server case when both are present in the context.
 
-            $response = Http::timeout(60)
-                ->connectTimeout(10)
-                ->withHeaders([
-                    'Authorization' => 'Bearer ' . env('OPENROUTER_API_KEY'),
-                    'HTTP-Referer'  => env('APP_URL'),
-                    'X-Title'       => env('APP_NAME'),
-                    'Content-Type'  => 'application/json',
-                ])
-                ->post(
-                    'https://openrouter.ai/api/v1/chat/completions',
-                    [
+{$fallbackMessage}
 
-                        // GANTI MODEL
-                        'model' => 'nvidia/nemotron-3-ultra-550b-a55b:free',
+=========================
+INFORMATION
+=========================
 
-                        'messages' => [
+{$context}
 
+=========================
+QUESTION
+=========================
+
+{$question}
+
+PROMPT;
+
+        $cacheKey = 'ai_' . md5($question . $context);
+
+        return Cache::remember(
+            $cacheKey,
+            now()->addMinutes(30),
+
+            function () use (
+
+                $prompt,
+                $fallbackMessage,
+                $start
+
+            ) {
+
+                try {
+
+                    $apiKey = trim((string) env('OPENROUTER_API_KEY'));
+
+                    if ($apiKey === '') {
+                        return $fallbackMessage;
+                    }
+
+                    $response = Http::timeout(8)
+                        ->connectTimeout(2)
+                        ->retry(1, 200)
+                        ->withHeaders([
+
+                            'Authorization' => 'Bearer ' . $apiKey,
+                            'HTTP-Referer'  => env('APP_URL'),
+                            'X-Title'       => env('APP_NAME'),
+                            'Content-Type'  => 'application/json',
+                            'Accept'        => 'application/json',
+
+                        ])
+                                                ->post(
+                            'https://openrouter.ai/api/v1/chat/completions',
                             [
-                                'role' => 'system',
-                                'content' => 'Kamu adalah Customer Service perusahaan.'
-                            ],
 
-                            [
-                                'role' => 'user',
-                                'content' => $prompt
+                                'model' => env('OPENROUTER_MODEL'),
+
+                                'messages' => [
+
+                                    [
+                                        'role' => 'system',
+                                        'content' => 'You are a professional customer service assistant.'
+                                    ],
+
+                                    [
+                                        'role' => 'user',
+                                        'content' => $prompt
+                                    ]
+
+                                ],
+
+                                'temperature' => 0,
+
+                                'top_p' => 1,
+
+                                'max_tokens' => 260,
+
+                                'frequency_penalty' => 0,
+
+                                'presence_penalty' => 0,
+
+                                'seed' => 123,
+
                             ]
+                        );
 
-                        ],
+                    if (!$response->successful()) {
 
-                        'temperature' => 0.2,
-                        'max_tokens' => 300
+                        Log::error('OpenRouter Error', [
 
-                    ]
-                );
+                            'status' => $response->status(),
 
-            if (!$response->successful()) {
-                return "OpenRouter Error : ".$response->body();
+                            'body' => $response->body(),
+
+                        ]);
+
+                        return "Mohon maaf, saat ini sistem sedang mengalami gangguan. Silakan coba beberapa saat lagi.";
+
+                    }
+
+                    $reply = trim((string) data_get(
+                        $response->json(),
+                        'choices.0.message.content',
+                        ''
+                    ));
+
+                    if ($reply === '') {
+
+                        return $fallbackMessage;
+
+                    }
+
+                    $replyLower = mb_strtolower($reply);
+
+                    $blockedWords = [
+
+                        'chatgpt',
+                        'openai',
+                        'laravel',
+                        'backend ticketing',
+                        'thesis',
+                        'final project',
+                        'according to the document',
+                        'according to the manual',
+                        'according to the pdf',
+                        'pdf',
+                        'silakan baca manual',
+                        'harus membaca manual',
+                        'baca manual',
+                        'refer to the manual',
+                    ];
+
+                    foreach ($blockedWords as $word) {
+
+                        if (str_contains($replyLower, $word)) {
+
+                            return $fallbackMessage;
+
+                        }
+
+                    }
+
+                    Log::info('AI Response', [
+
+                        'time_ms' => round(
+                            (microtime(true) - $start) * 1000,
+                            2
+                        ),
+
+                        'tokens_limit' => 120,
+
+                    ]);
+
+                    return $reply;
+                                    } catch (\Throwable $e) {
+
+                    Log::error('AI Exception', [
+
+                        'message' => $e->getMessage(),
+
+                        'file' => $e->getFile(),
+
+                        'line' => $e->getLine(),
+
+                        'trace' => $e->getTraceAsString(),
+
+                    ]);
+
+                    return "Mohon maaf, saat ini sistem sedang mengalami gangguan. Silakan coba beberapa saat lagi.";
+
+                }
+
             }
 
-            $json = $response->json();
+        );
 
-            // Ambil jawaban AI
-            $reply = data_get(
-                $json,
-                'choices.0.message.content'
-            );
+    }
+        private function detectLanguage(string $text): string
+    {
+        $text = mb_strtolower(trim($text));
 
-            if (!empty($reply)) {
-                return trim($reply);
+        $indonesian = [
+            'apa',
+            'bagaimana',
+            'cara',
+            'tolong',
+            'mohon',
+            'bisa',
+            'apakah',
+            'kenapa',
+            'mengapa',
+            'dimana',
+            'kapan',
+            'siapa',
+            'halo',
+            'hai',
+            'terima kasih',
+            'makasih',
+            'selamat',
+            'langkah',
+            'gunakan',
+            'pakai',
+            'login',
+            'akun',
+            'jaringan',
+            'server',
+        ];
+
+        $english = [
+            'what',
+            'how',
+            'where',
+            'when',
+            'who',
+            'why',
+            'please',
+            'thanks',
+            'thank you',
+            'hello',
+            'hi',
+            'guide',
+            'step',
+            'steps',
+            'login',
+            'account',
+            'network',
+            'server',
+            'vpn',
+            'help',
+        ];
+
+        $idScore = 0;
+        $enScore = 0;
+
+        foreach ($indonesian as $word) {
+            if (str_contains($text, $word)) {
+                $idScore++;
             }
-
-            return "AI tidak memberikan jawaban.";
-
-        } catch (\Throwable $e) {
-
-            return "Server AI Error : ".$e->getMessage();
-
         }
+
+        foreach ($english as $word) {
+            if (str_contains($text, $word)) {
+                $enScore++;
+            }
+        }
+
+        return $idScore >= $enScore
+            ? 'indonesia'
+            : 'english';
     }
 }

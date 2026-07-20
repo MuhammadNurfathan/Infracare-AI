@@ -2,60 +2,120 @@
 
 namespace App\Services\Intent;
 
-class ServiceIntent implements  IntentServiceInterface
+class ServiceIntent implements ServiceIntentInterface
 {
     public function detect(string $message): string
     {
-        $text = strtoLower($message);
+        $message = mb_strtolower(trim($message ?? ''));
+        $message = preg_replace('/[^\p{L}\p{N}\s]/u', ' ', $message) ?? $message;
+        $message = preg_replace('/\s+/', ' ', $message);
 
-        $greetings =
-        [
+        /*
+        |--------------------------------------------------------------------------
+        | Greeting
+        |--------------------------------------------------------------------------
+        */
+
+        $greetings = [
             'halo',
-            'hello',
+            'hallo',
+            'hai',
             'hi',
+            'hello',
+            'hy',
             'hey',
+            'pagi',
+            'siang',
+            'sore',
+            'malam',
+            'permisi',
+            'assalamualaikum',
+            'assalamu alaikum',
             'selamat pagi',
             'selamat siang',
             'selamat sore',
-            'selamat malam'
+            'selamat malam',
+            'salam',
         ];
 
-        foreach ($greetings as $greeting) {
-            if (str_contains($text, $greeting)) {
+        foreach ($greetings as $word) {
+            if (str_contains($message, $word)) {
                 return 'greeting';
             }
         }
 
-        $thanks= 
-        [
+        /*
+        |--------------------------------------------------------------------------
+        | Thanks
+        |--------------------------------------------------------------------------
+        */
+
+        $thanks = [
             'terima kasih',
             'makasih',
+            'makasih ya',
+            'makasih banyak',
             'thanks',
-            'thank you'
+            'thank you',
+            'thx',
+            'ty',
+            'sip makasih',
+            'oke makasih',
+            'terima kasih banyak',
         ];
 
-        foreach ($thanks as $thank) {
-            if (str_contains($text, $thank)) {
+        foreach ($thanks as $word) {
+            if (str_contains($message, $word)) {
                 return 'thanks';
             }
         }
 
-         $admins = [
+        /*
+        |--------------------------------------------------------------------------
+        | Admin / Human
+        |--------------------------------------------------------------------------
+        */
+
+        $admins = [
             'admin',
             'cs',
             'customer service',
-            'orang'
+            'customer support',
+            'support',
+            'tim support',
+            'operator',
+            'human',
+            'orang',
+            'staff',
+            'pegawai',
+            'teknisi',
+            'hubungi admin',
+            'hubungi cs',
+            'hubungi support',
+            'bicara admin',
+            'bicara cs',
+            'bicara support',
+            'chat admin',
+            'chat dengan admin',
+            'contact admin',
+            'contact support',
+            'talk to admin',
+            'live agent',
+            'agent',
         ];
 
         foreach ($admins as $word) {
-
-            if (str_contains($text, $word)) {
+            if (str_contains($message, $word)) {
                 return 'admin';
             }
-
         }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Default
+        |--------------------------------------------------------------------------
+        */
 
         return 'question';
     }
-
-    }
+}

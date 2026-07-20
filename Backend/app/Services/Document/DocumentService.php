@@ -2,81 +2,221 @@
 
 namespace App\Services\Document;
 
-use App\Models\Document;
-use App\Repositories\DocumentRepositoryInterface;
-use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Storage;
-use Illuminate\Support\Str;
-use Smalot\PdfParser\Parser;
+    use App\Models\Document;
+    use App\Models\KnowledgeChunk;
+    use App\Repositories\DocumentRepositoryInterface;
+    use Illuminate\Support\Facades\DB;
+    use Illuminate\Support\Facades\Storage;
+    use Illuminate\Support\Str;
+    use Smalot\PdfParser\Parser;
 
-class DocumentService implements DocumentServiceInterface
-{
-    public function __construct(
-        private DocumentRepositoryInterface $documentRepository
-    ) {}
-
-    public function upload(array $data): Document
+    class DocumentService implements DocumentServiceInterface
     {
-        return DB::transaction(function () use ($data) {
+        public function __construct(
+            private DocumentRepositoryInterface $documentRepository
+        ) {
+        }
 
-            $file = $data['document'];
+        public function upload(array $data): Document
+        {
+            return DB::transaction(function () use ($data) {
 
-            // Generate nama file unik
-            $fileName = Str::uuid() . '.' . $file->getClientOriginalExtension();
+                /*
+                |--------------------------------------------------------------------------
+                | Upload File
+                |--------------------------------------------------------------------------
+                */
 
-            // Simpan file ke storage/app/public/documents
-            $filePath = $file->storeAs(
-                'documents',
-                $fileName,
-                'public'
+                $file = $data['document'];
+
+                $fileName = Str::uuid() . '.' . $file->getClientOriginalExtension();
+
+                $filePath = $file->storeAs(
+                    'documents',
+                    $fileName,
+                    'public'
+                );
+
+                /*
+                |--------------------------------------------------------------------------
+                | Parse PDF
+                |--------------------------------------------------------------------------
+                */
+
+                $parser = new Parser();
+
+                $pdf = $parser->parseFile(
+                    storage_path('app/public/' . $filePath)
+                );
+
+                $content = $pdf->getText();
+
+                /*
+                |--------------------------------------------------------------------------
+                | Clean Text
+                |--------------------------------------------------------------------------
+                */
+
+                $content = $this->cleanText($content);
+
+                /*
+                |--------------------------------------------------------------------------
+                | Save Document
+                |--------------------------------------------------------------------------
+                */
+
+                $document = $this->documentRepository->create([
+
+                    'title'         => $data['title'],
+                    'file_name'     => $fileName,
+                    'file_path'     => $filePath,
+                    'content'       => $content,
+                    'file_type'     => $file->getClientOriginalExtension(),
+                    'total_chunks'  => 0,
+                    'status'        => 'uploaded',
+
+                ]);
+
+                /*
+                |--------------------------------------------------------------------------
+                | Delete Old Chunk
+                |--------------------------------------------------------------------------
+                */
+
+                KnowledgeChunk::where(
+                    'document_id',
+                    $document->id
+                )->delete();
+
+                /*
+                |--------------------------------------------------------------------------
+                | Split Chunk
+                |--------------------------------------------------------------------------
+                */
+
+                $chunks = $this->splitIntoChunks($content);
+
+                foreach ($chunks as $index => $chunk) {
+
+                    KnowledgeChunk::create([
+
+                        'document_id'  => $document->id,
+                        'chunk_number' => $index + 1,
+                        'content'      => $chunk,
+                        'embedding'    => null,
+
+                    ]);
+
+                }
+
+                /*
+                |--------------------------------------------------------------------------
+                | Update Total Chunk
+                |--------------------------------------------------------------------------
+                */
+
+                $document->update([
+                    'total_chunks' => count($chunks)
+                ]);
+
+                return $document;
+            });
+        }
+
+        /**
+         * Bersihkan text hasil parser PDF
+         */
+        private function cleanText(string $text): string
+        {
+            $text = mb_convert_encoding(
+                $text,
+                'UTF-8',
+                'auto'
             );
 
-            // Parse isi PDF
-            $parser = new Parser();
-
-            $pdf = $parser->parseFile(
-                storage_path('app/public/' . $filePath)
+            $text = iconv(
+                'UTF-8',
+                'UTF-8//IGNORE',
+                $text
             );
 
-            $content = $pdf->getText();
+            $text = preg_replace('/[[:^print:]]/', ' ', $text);
 
-            // Data yang akan disimpan ke database
-            $documentData = [
-                'title'         => $data['title'],
-                'file_name'     => $fileName,
-                'file_path'     => $filePath,
-                'content'       => $content,
-                'file_type'     => $file->getClientOriginalExtension(),
-                'total_chunks'  => 0,
-                'status'        => 'uploaded',
-            ];
+            $text = preg_replace('/\s+/', ' ', $text);
 
-            return $this->documentRepository->create($documentData);
-        });
-    }
+            return trim($text);
+        }
 
-    public function getAll()
-    {
-        return $this->documentRepository->getAll();
-    }
+        /**
+         * Split document menjadi chunk
+         */
+        private function splitIntoChunks(string $text): array
+        {
+            $sentences = preg_split(
+                '/(?<=[.?!])\s+/',
+                $text
+            );
 
-    public function findById(int $id): ?Document
-    {
-        return $this->documentRepository->findById($id);
-    }
+            $chunks = [];
 
-    public function delete(Document $document): bool
-    {
-        return DB::transaction(function () use ($document) {
+            $current = '';
 
-            if (
-                $document->file_path &&
-                Storage::disk('public')->exists($document->file_path)
-            ) {
-                Storage::disk('public')->delete($document->file_path);
+            foreach ($sentences as $sentence) {
+
+                if (
+                    strlen($current . ' ' . $sentence) > 1200
+                ) {
+
+                    $chunks[] = trim($current);
+
+                    $current = $sentence;
+
+                } else {
+
+                    $current .= ' ' . $sentence;
+
+                }
+
             }
 
-            return $this->documentRepository->delete($document);
-        });
+            if (!empty(trim($current))) {
+                $chunks[] = trim($current);
+            }
+
+            return $chunks;
+        }
+
+        public function getAll()
+        {
+            return $this->documentRepository->getAll();
+        }
+
+        public function findById(int $id): ?Document
+        {
+            return $this->documentRepository->findById($id);
+        }
+
+        public function delete(Document $document): bool
+        {
+            return DB::transaction(function () use ($document) {
+
+                KnowledgeChunk::where(
+                    'document_id',
+                    $document->id
+                )->delete();
+
+                if (
+                    $document->file_path &&
+                    Storage::disk('public')->exists($document->file_path)
+                ) {
+
+                    Storage::disk('public')->delete(
+                        $document->file_path
+                    );
+
+                }
+
+                return $this->documentRepository->delete($document);
+            });
+        }
     }
-}

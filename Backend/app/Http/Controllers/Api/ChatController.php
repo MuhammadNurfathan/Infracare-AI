@@ -21,7 +21,7 @@ class ChatController extends Controller
             
         ]);
 
-        $reply = $this->chatService->receiveMessage(
+        $result = $this->chatService->receiveMessage(
             $request->only([
                 'phone',
                 'name',
@@ -31,7 +31,9 @@ class ChatController extends Controller
 
         return response()->json([
             'success' => true,
-            'reply' => $reply
+            'reply' => $result['reply'],
+            'should_escalate' => $result['should_escalate'],
+            'confidence' => $result['confidence'],
         ]);
     }
 }

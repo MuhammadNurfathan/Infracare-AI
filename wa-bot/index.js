@@ -197,14 +197,21 @@ function markEscalationMenuShown(phone) {
     state.escalationMenuShown = true;
 }
 
-<<<<<<< HEAD
 async function sendEscalationMenu(sock, jid, phone, text) {
     const state = getCustomerState(phone);
     if (state.escalationMenuShown) {
         return;
     }
 
-=======
+    const isId = detectLanguage(text) === 'id';
+    const prompt = isId
+        ? 'Saya belum yakin bisa membantu sepenuhnya.\nPilih opsi berikut:\n1) Chat Admin\n2) Kirim Email ke eyre.hypercon@gmail.com\n\nKalau pilih nomor 2, cukup balas dengan kata "email" atau pilih nomor 2.'
+        : 'I’m not fully sure I can help with this yet.\nChoose one option:\n1) Chat Admin\n2) Send Email to eyre.hypercon@gmail.com\n\nIf you choose option 2, just reply with "email" or select 2.';
+
+    state.escalationMenuShown = true;
+    await sock.sendMessage(jid, { text: prompt }).catch(() => {});
+}
+
 async function escalateToAdmin(sock, jid, phone, text, source = "auto") {
     const state = getCustomerState(phone);
     const isId = detectLanguage(text) === 'id';
@@ -245,17 +252,6 @@ async function escalateToAdmin(sock, jid, phone, text, source = "auto") {
     }
 }
 
-async function sendEscalationMenu(sock, jid, text) {
->>>>>>> 0f4a1454c5969bec3cfa4d6a389f81b6f732305a
-    const isId = detectLanguage(text) === 'id';
-    const prompt = isId
-        ? 'Saya belum yakin bisa membantu sepenuhnya.\nPilih opsi berikut:\n1) Chat Admin\n2) Kirim Email ke eyre.hypercon@gmail.com\n\nKalau pilih nomor 2, cukup balas dengan kata "email" atau pilih nomor 2.'
-        : 'I’m not fully sure I can help with this yet.\nChoose one option:\n1) Chat Admin\n2) Send Email to eyre.hypercon@gmail.com\n\nIf you choose option 2, just reply with "email" or select 2.';
-
-    state.escalationMenuShown = true;
-    await sock.sendMessage(jid, { text: prompt }).catch(() => {});
-}
-
 async function sendFallbackReply(sock, jid, text) {
     const isId = detectLanguage(text) === 'id';
     const fallback = isId
@@ -287,14 +283,17 @@ async function tryEndAdminSession(sock, jid, phone, text) {
         return false;
     }
 
-    const targetPhone = (text.match(/\b\d{8,15}\b/g) || [])[0] || lastEscalatedSession?.phone || phone || null;
-
-    if (!targetPhone && !lastEscalatedSession) {
+    if (!lastEscalatedSession) {
         return false;
     }
 
-    const targetState = targetPhone ? getCustomerState(targetPhone) : null;
-    const targetJid = (targetState?.sessionJid || lastEscalatedSession?.jid || jid || "").trim();
+    const isAdminCloseMessage = normalizeText(jid || "") === normalizeText(lastEscalatedSession?.jid || "");
+    if (!isAdminCloseMessage) {
+        return false;
+    }
+
+    const targetState = getCustomerState(lastEscalatedSession.phone);
+    const targetJid = (targetState?.sessionJid || lastEscalatedSession?.jid || "").trim();
 
     if (targetState) {
         targetState.botPaused = false;
@@ -304,15 +303,9 @@ async function tryEndAdminSession(sock, jid, phone, text) {
         targetState.menuShown = false;
     }
 
-<<<<<<< HEAD
     if (targetJid) {
         await sock.sendMessage(targetJid, {
             text: getSessionClosedReply(text)
-=======
-    if (lastEscalatedSession?.jid) {
-        await sock.sendMessage(lastEscalatedSession.jid, {
-            text: getSessionEndedReply(text)
->>>>>>> 0f4a1454c5969bec3cfa4d6a389f81b6f732305a
         }).catch(() => {});
     }
 
@@ -434,8 +427,6 @@ async function startBot() {
             if (!msg) return;
 
             if (!msg.message) return;
-
-            if (msg.key.fromMe) return;
 
             const jid = msg.key.remoteJid;
 
@@ -561,16 +552,13 @@ async function startBot() {
             const shouldEscalate = shouldOfferEscalationMenu(text, response?.data);
 
             if (shouldEscalate && shouldShowEscalationMenu(text, phone)) {
-<<<<<<< HEAD
                 await sendEscalationMenu(sock, jid, phone, text);
-=======
                 await sock.sendMessage(jid, {
                     text: botReply
                 }).catch(() => {});
                 await sendEscalationMenu(sock, jid, text);
                 markEscalationMenuShown(phone);
                 return;
->>>>>>> 0f4a1454c5969bec3cfa4d6a389f81b6f732305a
             }
 
             console.log("✅ Reply berhasil dikirim");

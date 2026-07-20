@@ -317,7 +317,7 @@ class SearchService implements SearchServiceInterface
                     |--------------------------------------------------------------------------
                     */
 
-                    $context = mb_substr($context, 0, 15000);
+                    $context = mb_substr($context, 0, 30000);
 
                     $chunk->setAttribute(
                         'search_score',

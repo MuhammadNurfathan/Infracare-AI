@@ -232,6 +232,10 @@ PROMPT;
     {
         $text = mb_strtolower(trim($text));
 
+        if ($text === '') {
+            return 'indonesia';
+        }
+
         $indonesian = [
             'apa',
             'bagaimana',
@@ -257,6 +261,8 @@ PROMPT;
             'akun',
             'jaringan',
             'server',
+            'kirim',
+            'email'
         ];
 
         $english = [
@@ -280,6 +286,9 @@ PROMPT;
             'server',
             'vpn',
             'help',
+            'please wait',
+            'contact admin',
+            'send email'
         ];
 
         $idScore = 0;
@@ -295,6 +304,17 @@ PROMPT;
             if (str_contains($text, $word)) {
                 $enScore++;
             }
+        }
+
+        $hasIndonesianPattern = preg_match('/\b(apa|bagaimana|cara|tolong|mohon|bisa|apakah|kenapa|mengapa|dimana|kapan|siapa|halo|hai|terima|makasih|selamat|langkah|gunakan|pakai|login|akun|jaringan|server|kirim|email)\b/i', $text) === 1;
+        $hasEnglishPattern = preg_match('/\b(what|how|where|when|who|why|please|thanks|hello|hi|guide|step|steps|support|contact|admin|email|login|account|network|vpn|help)\b/i', $text) === 1;
+
+        if ($hasIndonesianPattern && $idScore >= $enScore) {
+            return 'indonesia';
+        }
+
+        if ($hasEnglishPattern && $enScore > $idScore) {
+            return 'english';
         }
 
         return $idScore >= $enScore

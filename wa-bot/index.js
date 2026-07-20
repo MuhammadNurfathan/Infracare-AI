@@ -81,6 +81,14 @@ function getGreetingReply(text) {
         : 'Hello 👋\n\nWelcome to Customer Service of PT Siber Sinergi Teknologi.\n\nHow can we help you today?';
 }
 
+function getSessionEndedReply(text) {
+    const isId = detectLanguage(text) === 'id';
+
+    return isId
+        ? 'Terima kasih telah menghubungi kami. Jika ada yang ingin ditanyakan, silakan chat kami kembali.'
+        : 'Thank you for contacting us. If you have any questions, please chat with us again.';
+}
+
 function getCustomerState(phone) {
     if (!customerStates.has(phone)) {
         customerStates.set(phone, {
@@ -119,11 +127,19 @@ function getPhoneFromJid(jid, msg) {
         .replace(/:.+$/, "")
         .trim();
 
-    if (participant && /^\d+$/.test(participant) && participant.length >= 8) {
-        return participant;
+    const candidates = [participant, raw].filter(Boolean);
+
+    for (const candidate of candidates) {
+        if (!/^\d+$/.test(candidate)) {
+            continue;
+        }
+
+        if (candidate.length >= 10 && candidate.length <= 15) {
+            return candidate;
+        }
     }
 
-    return /^\d+$/.test(raw) ? raw : "";
+    return "";
 }
 
 function shouldShowTopicMenu(text, phone) {
@@ -171,6 +187,46 @@ function markTopicMenuShown(phone) {
 function markEscalationMenuShown(phone) {
     const state = getCustomerState(phone);
     state.escalationMenuShown = true;
+}
+
+async function escalateToAdmin(sock, jid, phone, text, source = "auto") {
+    const state = getCustomerState(phone);
+    const isId = detectLanguage(text) === 'id';
+
+    state.escalatedToAdmin = true;
+    state.botPaused = true;
+    state.sessionJid = jid;
+    lastEscalatedSession = { phone, jid };
+
+    const messageText = String(text || "").trim() || (isId ? 'Pesan pengguna' : 'User message');
+    const contextReply = source === 'choice'
+        ? (isId ? 'Pilihan user: kirim email' : 'User chose to send email')
+        : (isId ? 'Eskalasi otomatis karena bot tidak yakin / tidak ada informasi yang cocok.' : 'Automatic escalation because the bot is not sure / no matching information.');
+
+    try {
+        await axios.post(
+            'http://127.0.0.1:8000/api/chat/escalate-email',
+            {
+                phone,
+                name: phone,
+                message: messageText,
+                reply: contextReply
+            },
+            { timeout: 10000 }
+        );
+
+        const successReply = isId
+            ? 'Pesan Anda telah diteruskan ke admin.'
+            : 'Your message has been forwarded to an admin.';
+
+        await sock.sendMessage(jid, { text: successReply }).catch(() => {});
+    } catch (err) {
+        const errorReply = isId
+            ? 'Maaf, pesan Anda belum berhasil diteruskan. Silakan hubungi admin secara manual.'
+            : 'Sorry, your message could not be forwarded. Please contact the admin manually.';
+
+        await sock.sendMessage(jid, { text: errorReply }).catch(() => {});
+    }
 }
 
 async function sendEscalationMenu(sock, jid, text) {
@@ -229,7 +285,7 @@ async function tryEndAdminSession(sock, jid, phone, text) {
 
     if (lastEscalatedSession?.jid) {
         await sock.sendMessage(lastEscalatedSession.jid, {
-            text: getGreetingReply('halo')
+            text: getSessionEndedReply(text)
         }).catch(() => {});
     }
 
@@ -245,51 +301,36 @@ async function handleButtonChoice(sock, jid, phone, text) {
         return true;
     }
 
-    const isAdminChoice = normalized === 'escalate_admin' || normalized === '1' || normalized === 'satu'
-        || normalized.includes('admin') || normalized.includes('hubungi admin') || normalized.includes('contact admin') || normalized.includes('chat admin');
+    const isAdminChoice = state.escalationMenuShown && (
+        normalized === 'escalate_admin'
+        || normalized === '1'
+        || normalized === 'satu'
+        || normalized === 'chat admin'
+        || normalized === 'hubungi admin'
+        || normalized === 'contact admin'
+    );
 
     if (isAdminChoice) {
-        state.escalatedToAdmin = true;
-        state.botPaused = true;
         state.escalationMenuShown = true;
-        state.sessionJid = jid;
-        lastEscalatedSession = { phone, jid };
-        const adminReply = detectLanguage(text) === 'id'
-            ? 'Sesi Anda telah dialihkan ke Admin. Bot tidak akan membalas pesan Anda lagi sampai sesi ditutup. Balas dengan kata "akhiri" jika admin sudah selesai.'
-            : 'Your session has been handed over to an admin. The bot will not reply again until the session is closed. Reply with "akhiri" when the admin is done.';
-
-        await sock.sendMessage(jid, { text: adminReply }).catch(() => {});
+        await escalateToAdmin(sock, jid, phone, text, 'admin');
         return true;
     }
 
-    const isEmailChoice = normalized === 'escalate_email' || normalized === '2' || normalized === 'dua'
-        || normalized.includes('email') || normalized.includes('kirim email') || normalized.includes('send email');
+    const isEmailChoice = state.escalationMenuShown && (
+        normalized === 'escalate_email'
+        || normalized === '2'
+        || normalized === 'dua'
+        || normalized === 'email'
+        || normalized === 'kirim email'
+        || normalized === 'send email'
+        || normalized === 'option 2'
+        || normalized === 'pilih 2'
+        || normalized === 'pilih nomor 2'
+    );
 
     if (isEmailChoice) {
-        try {
-            await axios.post(
-                'http://127.0.0.1:8000/api/chat/escalate-email',
-                {
-                    phone,
-                    name: phone,
-                    message: 'Escalasi dari WhatsApp',
-                    reply: 'Pilihan user: kirim email'
-                },
-                { timeout: 10000 }
-            );
-
-            const emailReply = detectLanguage(text) === 'id'
-                ? 'Email eskalasi telah dikirim ke eyre.hypercon@gmail.com.'
-                : 'The escalation email has been sent to eyre.hypercon@gmail.com.';
-
-            await sock.sendMessage(jid, { text: emailReply }).catch(() => {});
-        } catch (err) {
-            const emailReply = detectLanguage(text) === 'id'
-                ? 'Maaf, email eskalasi belum berhasil dikirim. Silakan hubungi admin secara manual.'
-                : 'Sorry, the escalation email could not be sent. Please contact the admin manually.';
-
-            await sock.sendMessage(jid, { text: emailReply }).catch(() => {});
-        }
+        state.escalationMenuShown = true;
+        await escalateToAdmin(sock, jid, phone, text, 'choice');
         return true;
     }
 
@@ -431,11 +472,6 @@ async function startBot() {
             }
 
             if (state.botPaused && !isEndSessionText(text)) {
-                await sock.sendMessage(jid, {
-                    text: detectLanguage(text) === 'id'
-                        ? 'Sesi sedang ditangani Admin. Balas dengan kata "akhiri" jika sesi sudah selesai.'
-                        : 'The admin session is currently active. Reply with "akhiri" if the session has finished.'
-                }).catch(() => {});
                 return;
             }
 
@@ -453,6 +489,11 @@ async function startBot() {
                 await sock.sendMessage(jid, {
                     text: getGreetingReply(text)
                 }).catch(() => {});
+                return;
+            }
+
+            if (isAdminRequest) {
+                await escalateToAdmin(sock, jid, phone, text, 'admin_request');
                 return;
             }
 
@@ -494,8 +535,12 @@ async function startBot() {
             const shouldEscalate = shouldOfferEscalationMenu(text, response?.data);
 
             if (shouldEscalate && shouldShowEscalationMenu(text, phone)) {
+                await sock.sendMessage(jid, {
+                    text: botReply
+                }).catch(() => {});
                 await sendEscalationMenu(sock, jid, text);
                 markEscalationMenuShown(phone);
+                return;
             }
 
             console.log("✅ Reply berhasil dikirim");

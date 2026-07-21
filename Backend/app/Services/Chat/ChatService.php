@@ -26,20 +26,12 @@ class ChatService implements ChatServiceInterface
 
         $customer = Customer::updateOrCreate(
             ['phone' => $phone],
-            [
-                'name' => $name,
-                'last_chat_at' => now(),
-            ]
+            ['name' => $name, 'last_chat_at' => now()]
         );
 
         $conversation = Conversation::firstOrCreate(
-            [
-                'customer_id' => $customer->id,
-                'status' => 'open',
-            ],
-            [
-                'started_at' => now(),
-            ]
+            ['customer_id' => $customer->id, 'status' => 'open'],
+            ['started_at' => now()]
         );
 
         Message::create([
@@ -50,63 +42,37 @@ class ChatService implements ChatServiceInterface
 
         $intent = $this->intentService->detect($message);
 
-        if ($intent === 'greeting') {
-            $reply = $this->buildGreetingReply($message);
-            $confidence = 92;
-            $shouldEscalate = false;
-
-            Message::create([
-                'conversation_id' => $conversation->id,
-                'sender' => 'bot',
-                'message' => $reply,
-                'confidence' => $confidence,
-            ]);
-
-            return [
-                'reply' => $reply,
-                'should_escalate' => $shouldEscalate,
-                'confidence' => (float) $confidence,
-            ];
+        if (in_array($intent, ['greeting', 'thanks', 'admin'], true)) {
+            return $this->respondToSimpleIntent($conversation->id, $intent, $message);
         }
 
-        if ($intent === 'thanks') {
-            $reply = $this->buildThanksReply($message);
-            $confidence = 90;
-            $shouldEscalate = false;
+        return $this->respondFromKnowledgeBase($conversation->id, $message);
+    }
 
-            Message::create([
-                'conversation_id' => $conversation->id,
-                'sender' => 'bot',
-                'message' => $reply,
-                'confidence' => $confidence,
-            ]);
+    private function respondToSimpleIntent(int $conversationId, string $intent, string $message): array
+    {
+        [$reply, $confidence, $shouldEscalate] = match ($intent) {
+            'greeting' => [$this->buildGreetingReply($message), 92, false],
+            'thanks' => [$this->buildThanksReply($message), 90, false],
+            'admin' => [$this->buildAdminReply($message), 88, true],
+        };
 
-            return [
-                'reply' => $reply,
-                'should_escalate' => $shouldEscalate,
-                'confidence' => (float) $confidence,
-            ];
-        }
+        Message::create([
+            'conversation_id' => $conversationId,
+            'sender' => 'bot',
+            'message' => $reply,
+            'confidence' => $confidence,
+        ]);
 
-        if ($intent === 'admin') {
-            $reply = $this->buildAdminReply($message);
-            $confidence = 88;
-            $shouldEscalate = true;
+        return [
+            'reply' => $reply,
+            'should_escalate' => $shouldEscalate,
+            'confidence' => (float) $confidence,
+        ];
+    }
 
-            Message::create([
-                'conversation_id' => $conversation->id,
-                'sender' => 'bot',
-                'message' => $reply,
-                'confidence' => $confidence,
-            ]);
-
-            return [
-                'reply' => $reply,
-                'should_escalate' => $shouldEscalate,
-                'confidence' => (float) $confidence,
-            ];
-        }
-
+    private function respondFromKnowledgeBase(int $conversationId, string $message): array
+    {
         $searchResults = collect();
 
         try {
@@ -124,69 +90,43 @@ class ChatService implements ChatServiceInterface
             ->values();
 
         $context = $contextChunks->implode("\n\n");
-
         $bestScore = (int) ($searchResults->first()?->getAttribute('search_score') ?? 0);
-        $hasMeaningfulContext = $contextChunks->isNotEmpty() && ($bestScore >= 20 || $contextChunks->count() >= 2);
+        $hasContext = $contextChunks->isNotEmpty();
 
-        $reply = $hasMeaningfulContext
-            ? $this->tryGenerateFastReply($message, $context, $contextChunks)
-            : 'Mohon maaf, informasi yang Anda butuhkan belum tersedia pada manual perusahaan.';
+        $usedAi = false;
 
-        $replyLower = mb_strtolower($reply);
-        $fallbackLike = str_contains($replyLower, 'informasi yang diminta tidak tersedia')
-            || str_contains($replyLower, 'tidak tersedia pada manual')
-            || str_contains($replyLower, 'saat ini sistem sedang mengalami gangguan')
-            || str_contains($replyLower, 'silakan coba beberapa saat lagi')
-            || str_contains($replyLower, 'belum tersedia')
-            || str_contains($replyLower, 'belum bisa')
-            || str_contains($replyLower, 'maaf, saya belum bisa')
-            || str_contains($replyLower, 'sistem sedang mengalami gangguan');
+        // Only ask the AI to synthesize when there's actually something worth
+        // synthesizing from. A low search score does NOT disqualify a good AI
+        // answer later — it's only used here to decide whether to bother calling
+        // the AI at all.
+        $reply = ($hasContext && ($bestScore >= 20 || $contextChunks->count() >= 2))
+            ? $this->tryGenerateAiReply($message, $context)
+            : null;
 
-        if ($fallbackLike && $context !== '') {
+        if ($reply !== null) {
+            $usedAi = true;
+        } elseif ($hasContext) {
+            // AI failed, returned nothing usable, or context was too thin to
+            // bother calling it — merge the most relevant chunks directly
+            // instead of dumping a single raw, truncated chunk.
             $reply = $this->buildContextReply($message, $contextChunks);
-        }
-
-        $reply = $this->cleanupChunkNoise($reply);
-        $reply = $this->formatReadableReply($reply);
-        $reply = $this->improveUserFriendlyLayout($reply, $message);
-
-        $confidence = 0;
-        $shouldEscalate = false;
-
-        $isClearlyUnsupported = $fallbackLike
-            || $contextChunks->isEmpty()
-            || $bestScore < 15
-            || str_contains(mb_strtolower($reply), 'belum tersedia')
-            || str_contains(mb_strtolower($reply), 'tidak tersedia pada manual')
-            || str_contains(mb_strtolower($reply), 'informasi yang anda butuhkan belum tersedia');
-
-        if ($hasMeaningfulContext && !$fallbackLike && !$isClearlyUnsupported) {
-            $confidence = 78;
-        } elseif ($contextChunks->isNotEmpty() && $bestScore >= 10 && !$isClearlyUnsupported) {
-            $confidence = 55;
-            $shouldEscalate = false;
         } else {
-            $confidence = 20;
-            $shouldEscalate = true;
-        }
-
-        if ($fallbackLike) {
-            $shouldEscalate = true;
-            $confidence = 35;
-        }
-
-        if ($isClearlyUnsupported && $contextChunks->isEmpty()) {
             $reply = $this->buildEscalationReply($message);
-            $shouldEscalate = true;
-            $confidence = 40;
-        } elseif ($isClearlyUnsupported && $contextChunks->isNotEmpty()) {
-            $reply = $this->buildContextReply($message, $contextChunks);
-            $shouldEscalate = false;
-            $confidence = 60;
         }
+
+        $reply = $this->finalizeReply($reply, $message, $usedAi);
+
+        $confidence = match (true) {
+            !$hasContext => 40,
+            $usedAi && $bestScore >= 20 => 78,
+            $usedAi => 65,
+            default => 55,
+        };
+
+        $shouldEscalate = !$hasContext;
 
         Message::create([
-            'conversation_id' => $conversation->id,
+            'conversation_id' => $conversationId,
             'sender' => 'bot',
             'message' => $reply,
             'confidence' => $confidence,
@@ -199,41 +139,61 @@ class ChatService implements ChatServiceInterface
         ];
     }
 
-    private function tryGenerateFastReply(string $message, string $context, $contextChunks): string
+    /**
+     * Returns null (instead of a fallback string) when the AI reply isn't usable,
+     * so the caller can fall back to raw context without checking magic strings twice.
+     */
+    private function tryGenerateAiReply(string $message, string $context): ?string
     {
         try {
-            $reply = $this->aiService->generateResponse($message, $context);
-            $replyLower = mb_strtolower($reply);
-            $fallbackLike = str_contains($replyLower, 'informasi yang diminta tidak tersedia')
-                || str_contains($replyLower, 'tidak tersedia pada manual')
-                || str_contains($replyLower, 'saat ini sistem sedang mengalami gangguan')
-                || str_contains($replyLower, 'silakan coba beberapa saat lagi')
-                || str_contains($replyLower, 'belum tersedia')
-                || str_contains($replyLower, 'belum bisa')
-                || str_contains($replyLower, 'maaf, saya belum bisa')
-                || str_contains($replyLower, 'sistem sedang mengalami gangguan');
-
-            if ($fallbackLike) {
-                return $this->buildContextReply($message, $contextChunks);
-            }
-
-            return $reply;
+            return $this->aiService->generateResponse($message, $context);
         } catch (\Throwable $e) {
-            return $this->buildContextReply($message, $contextChunks);
+            Log::error('AI reply generation failed', ['exception' => $e->getMessage()]);
+
+            return null;
         }
     }
 
+    /**
+     * Builds an answer directly from the retrieved context when the AI step
+     * isn't usable. Merges the most relevant chunks (not just the first one)
+     * so the reply reads as one answer instead of a single truncated dump.
+     */
     private function buildContextReply(string $message, $contextChunks): string
     {
         $normalizedQuestion = mb_strtolower(trim($message));
-        $normalizedQuestion = preg_replace('/[^a-z0-9\s]/u', ' ', $normalizedQuestion);
-        $normalizedQuestion = preg_replace('/\s+/', ' ', trim($normalizedQuestion));
-        $keywords = array_values(array_filter(preg_split('/\s+/', $normalizedQuestion) ?: [], fn ($word) => mb_strlen($word) >= 3));
+        $normalizedQuestion = preg_replace('/[^a-z0-9\s]/u', ' ', $normalizedQuestion) ?? '';
+        $normalizedQuestion = preg_replace('/\s+/', ' ', trim($normalizedQuestion)) ?? '';
+        $keywords = array_values(array_filter(
+            preg_split('/\s+/', $normalizedQuestion) ?: [],
+            fn ($word) => mb_strlen($word) >= 3
+        ));
 
-        $candidate = $contextChunks->first(function ($chunk) use ($keywords) {
-            $content = mb_strtolower((string) $chunk);
+        $ranked = $contextChunks
+            ->map(fn ($chunk) => (string) $chunk)
+            ->filter(fn ($chunk) => trim($chunk) !== '')
+            ->sortByDesc(function ($content) use ($keywords) {
+                $lower = mb_strtolower($content);
+                $hits = 0;
+
+                foreach ($keywords as $keyword) {
+                    if (str_contains($lower, $keyword)) {
+                        $hits++;
+                    }
+                }
+
+                return $hits;
+            })
+            ->values();
+
+        if ($ranked->isEmpty()) {
+            return 'Mohon maaf, informasi yang Anda butuhkan belum tersedia pada manual perusahaan.';
+        }
+
+        $relevant = $ranked->filter(function ($content) use ($keywords) {
+            $lower = mb_strtolower($content);
             foreach ($keywords as $keyword) {
-                if (str_contains($content, $keyword)) {
+                if (str_contains($lower, $keyword)) {
                     return true;
                 }
             }
@@ -241,108 +201,115 @@ class ChatService implements ChatServiceInterface
             return false;
         });
 
-        $selected = $candidate ?? $contextChunks->first();
-        if ($selected === null) {
-            return 'Mohon maaf, informasi yang Anda butuhkan belum tersedia pada manual perusahaan.';
+        // Only merge chunks that actually share vocabulary with the question.
+        // Falling back to unrelated chunks just to fill space is what produces
+        // answers that jump between unrelated topics.
+        $selected = $relevant->isNotEmpty() ? $relevant : $ranked->take(1);
+
+        $merged = $selected
+            ->take(3)
+            ->map(fn ($chunk) => $this->cleanRawChunk($chunk))
+            ->filter(fn ($chunk) => $chunk !== '')
+            ->unique()
+            ->implode("\n\n");
+
+        return $this->truncateAtSentence($merged, 1600);
+    }
+
+    /**
+     * Truncates without cutting a sentence (or a shell command line) in half.
+     */
+    private function truncateAtSentence(string $text, int $maxLength): string
+    {
+        if (mb_strlen($text) <= $maxLength) {
+            return $text;
         }
 
-        $reply = trim((string) $selected);
-        $reply = preg_replace('/\s+/', ' ', $reply);
+        $slice = mb_substr($text, 0, $maxLength);
 
-        return mb_substr($reply, 0, 900);
+        $lastBreak = max(
+            mb_strrpos($slice, ". "),
+            mb_strrpos($slice, ".\n"),
+            mb_strrpos($slice, "\n")
+        );
+
+        if ($lastBreak !== false && $lastBreak > $maxLength * 0.4) {
+            $slice = mb_substr($slice, 0, $lastBreak + 1);
+        }
+
+        return trim($slice);
     }
 
-    private function cleanupChunkNoise(string $reply): string
+    /**
+     * Structural cleanup for a single raw chunk before it's merged into a
+     * reply: drops chunk markers, and normalizes inline "Step N" / "Langkah N"
+     * labels onto their own numbered lines instead of running into the
+     * previous sentence.
+     */
+    private function cleanRawChunk(string $chunk): string
+    {
+        $text = trim($chunk);
+        $text = preg_replace('/\[Chunk\s*\d+\]\s*/i', '', $text) ?? $text;
+        $text = preg_replace('/\b(?:Step|Langkah)\s+(\d+)\s*[:.]?\s*/iu', "\n" . '$1. ', $text) ?? $text;
+        $text = preg_replace('/[ \t]+/', ' ', $text) ?? $text;
+        $text = preg_replace('/(?<!\n)(\d+\.\s)/u', "\n$1", $text) ?? $text;
+        $text = preg_replace('/\n{2,}/', "\n\n", $text) ?? $text;
+
+        return trim($text);
+    }
+
+    /**
+     * Single formatting pass. AI-generated replies already come pre-formatted
+     * from AIService, so only light, non-destructive cleanup is applied here —
+     * this used to be 3 separate regex passes stacked on top of each other,
+     * which is what was mangling the layout.
+     */
+    private function finalizeReply(string $reply, string $message, bool $isAiGenerated): string
     {
         $reply = trim($reply);
         $reply = str_replace(["\r\n", "\r"], "\n", $reply);
-
-        $reply = preg_replace('/\[Chunk\s*\d+\].*?/i', '', $reply) ?? $reply;
-        $reply = preg_replace('/\bChunk\s*\d+\b/i', '', $reply) ?? $reply;
-        $reply = preg_replace('/\s+/', ' ', $reply) ?? $reply;
         $reply = preg_replace('/\n{3,}/', "\n\n", $reply) ?? $reply;
-        $reply = preg_replace('/\n\s+/', "\n", $reply) ?? $reply;
-        $reply = preg_replace('/\s+([,.!?;:])/u', '$1', $reply) ?? $reply;
-        $reply = str_replace(["• ", "- "], "", $reply);
-        $reply = preg_replace('/(?<!\n)\s*(?=\d+\.)/u', "\n", $reply) ?? $reply;
-        $reply = preg_replace('/(?<!\n)\s*(?=Step\s+\d+)/i', "\n", $reply) ?? $reply;
+
+        $forbiddenPhrases = [
+            'chunk', 'chunks', 'section', 'sections', 'i looked', 'i see information about',
+            'let me look', 'looking at the chunks', 'looking at the context',
+            'the context mentions', 'from the context', 'from the provided context',
+            'based on the context',
+        ];
+
+        foreach ($forbiddenPhrases as $phrase) {
+            $reply = preg_replace('/\b' . preg_quote($phrase, '/') . '\b/i', '', $reply) ?? $reply;
+        }
+
+        $reply = preg_replace('/[ \t]{2,}/u', ' ', $reply) ?? $reply;
         $reply = preg_replace('/\n{2,}/', "\n\n", $reply) ?? $reply;
-
-        return trim($reply);
-    }
-
-    private function formatReadableReply(string $reply): string
-    {
         $reply = trim($reply);
-        $reply = str_replace(["\r\n", "\r"], "\n", $reply);
-        $reply = preg_replace('/[ \t]+/', ' ', $reply) ?? $reply;
-        $reply = preg_replace('/\n{3,}/', "\n\n", $reply) ?? $reply;
 
-        if (preg_match('/\n/', $reply) === 0 && mb_strlen($reply) > 220) {
-            $parts = preg_split('/(?<=[.!?])\s+/', $reply);
-            $cleanParts = array_values(array_filter(array_map('trim', $parts), fn ($item) => $item !== ''));
+        if ($isAiGenerated) {
+            return $reply;
+        }
 
-            if (count($cleanParts) > 2) {
-                $reply = implode("\n\n", $cleanParts);
+        // Raw context text needs a bit more structure: break long single-paragraph
+        // text into readable chunks and add a step-list lead-in for procedural asks.
+        if (!str_contains($reply, "\n") && mb_strlen($reply) > 220) {
+            $sentences = preg_split('/(?<=[.!?])\s+/', $reply) ?: [];
+            $sentences = array_values(array_filter(array_map('trim', $sentences), fn ($s) => $s !== ''));
+
+            if (count($sentences) > 2) {
+                $reply = implode("\n\n", $sentences);
             }
         }
 
-        $reply = preg_replace('/(^|\n)(\d+)\.\s+/u', "$1$2. ", $reply);
-        $reply = preg_replace('/(^|\n)(-|•)\s+/u', "$1- ", $reply);
-        $reply = preg_replace('/\n{2,}/', "\n\n", $reply) ?? $reply;
-
-        return trim($reply);
-    }
-
-    private function improveUserFriendlyLayout(string $reply, string $message): string
-    {
         $normalized = mb_strtolower(trim($message));
         $isProcedural = str_contains($normalized, 'password')
             || str_contains($normalized, 'kata sandi')
             || str_contains($normalized, 'refresh')
             || str_contains($normalized, 'reset')
             || str_contains($normalized, 'restart')
-            || str_contains($normalized, 'mulai ulang')
-            || str_contains($normalized, 'managed account')
-            || str_contains($normalized, 'management password');
+            || str_contains($normalized, 'mulai ulang');
 
-        $reply = trim($reply);
-        $reply = preg_replace('/\r\n|\r/', "\n", $reply) ?? $reply;
-        $reply = preg_replace('/\n\s*\n/', "\n", $reply) ?? $reply;
-        $reply = preg_replace('/(?<=\.)\s*(?=\d)/u', "\n", $reply) ?? $reply;
-        $reply = preg_replace('/\n{3,}/', "\n\n", $reply) ?? $reply;
-
-        $forbiddenPhrases = [
-            'chunk',
-            'chunks',
-            'section',
-            'sections',
-            'i looked',
-            'i see information about',
-            'let me look',
-            'looking at the chunks',
-            'looking at the context',
-            'the context mentions',
-            'from the context',
-            'from the provided context',
-            'based on the context',
-        ];
-
-        foreach ($forbiddenPhrases as $phrase) {
-            $reply = str_ireplace($phrase, '', $reply);
-        }
-
-        $reply = preg_replace('/\s{2,}/u', ' ', $reply) ?? $reply;
-        $reply = preg_replace('/\n{2,}/', "\n\n", $reply) ?? $reply;
-        $reply = trim($reply);
-
-        if (!$isProcedural) {
-            return $reply;
-        }
-
-        if (preg_match('/^(berikut langkah|langkah-langkah|langkah|untuk|to )/i', $reply) === 0) {
-            $prefix = "Berikut langkah yang bisa Anda ikuti:\n\n";
-            $reply = $prefix . $reply;
+        if ($isProcedural && preg_match('/^(berikut langkah|langkah-langkah|langkah|untuk|to )/i', $reply) === 0) {
+            $reply = "Berikut langkah yang bisa Anda ikuti:\n\n" . $reply;
         }
 
         return trim($reply);
@@ -353,8 +320,8 @@ class ChatService implements ChatServiceInterface
         $language = $this->detectLanguage($message);
 
         return $language === 'english'
-            ? "Hello! I can help you find the right answer from the available knowledge. Please describe the issue you are facing and I will guide you step by step."
-            : "Halo! Saya siap membantu Anda mencari jawaban dari panduan yang tersedia. Jelaskan masalah Anda, lalu saya akan bantu dengan langkah yang jelas.";
+            ? 'Hello! I can help you find the right answer from the available knowledge. Please describe the issue you are facing and I will guide you step by step.'
+            : 'Halo! Saya siap membantu Anda mencari jawaban dari panduan yang tersedia. Jelaskan masalah Anda, lalu saya akan bantu dengan langkah yang jelas.';
     }
 
     private function buildThanksReply(string $message): string
@@ -362,8 +329,8 @@ class ChatService implements ChatServiceInterface
         $language = $this->detectLanguage($message);
 
         return $language === 'english'
-            ? "You’re welcome. If you need anything else, just tell me what issue you are facing."
-            : "Sama-sama. Kalau ada hal lain yang ingin Anda tanyakan, silakan jelaskan masalahnya.";
+            ? 'You’re welcome. If you need anything else, just tell me what issue you are facing.'
+            : 'Sama-sama. Kalau ada hal lain yang ingin Anda tanyakan, silakan jelaskan masalahnya.';
     }
 
     private function buildAdminReply(string $message): string
@@ -396,14 +363,13 @@ class ChatService implements ChatServiceInterface
             'halo', 'hai', 'terima kasih', 'makasih', 'tolong', 'mohon', 'bantu', 'bagaimana',
             'cara', 'apa', 'apakah', 'kenapa', 'mengapa', 'dimana', 'kapan', 'siapa', 'saya',
             'anda', 'kami', 'silakan', 'langkah', 'gunakan', 'pakai', 'login', 'akun', 'server',
-            'jaringan', 'kirim', 'email', 'admin', 'manual', 'perlu', 'bisakah', 'gimana', 'buat',
-            'terus', 'sudah', 'belum', 'itu', 'ini', 'aja', 'dong', 'ya', 'sih'
+            'jaringan', 'kirim', 'email', 'admin', 'perlu', 'bisakah', 'gimana', 'buat',
         ];
 
         $englishMarkers = [
             'hello', 'hi', 'thank you', 'thanks', 'please', 'how', 'what', 'where', 'when', 'who',
             'why', 'can you', 'guide', 'step', 'steps', 'support', 'contact', 'admin', 'email',
-            'login', 'account', 'server', 'network', 'vpn', 'help', 'please wait'
+            'login', 'account', 'server', 'network', 'vpn', 'help',
         ];
 
         $idScore = 0;
@@ -421,22 +387,6 @@ class ChatService implements ChatServiceInterface
             }
         }
 
-        $hasIndonesianWord = preg_match('/[\p{Script=Latin}]+(?:\s|$)/u', $text) === 1 && preg_match('/[\x{00C0}-\x{024F}\x{1E00}-\x{1EFF}]/u', $text) === 1;
-        $hasEnglishWord = preg_match('/\b(?:the|and|for|with|this|that|please|thanks|how|what|where|when|who|why|can|you|your|contact|support|admin|email|server|login|account|network|vpn)\b/i', $text) === 1;
-
-        if ($idScore > 0 && $enScore === 0) {
-            return 'indonesia';
-        }
-
-        if ($hasIndonesianWord && $idScore >= $enScore) {
-            return 'indonesia';
-        }
-
-        if ($hasEnglishWord && $enScore > $idScore) {
-            return 'english';
-        }
-
-        return $idScore >= $enScore ? 'indonesia' : 'english';
+        return $enScore > $idScore ? 'english' : 'indonesia';
     }
 }
-

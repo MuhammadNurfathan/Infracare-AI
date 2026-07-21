@@ -16,17 +16,19 @@ const customerStates = new Map();
 // ==================== ADMIN CONFIG ====================
 const ADMIN_NUMBERS = (process.env.ADMIN_NUMBERS || '')
     .split(',')
-    .map(n => n.trim())
+    .map(n => n.trim().replace(/[^0-9]/g, ''))
     .filter(Boolean);
 
 function isAdminNumber(phone) {
-    return ADMIN_NUMBERS.includes(phone);
+    if (!phone) return false;
+    const cleanPhone = String(phone).replace(/[^0-9]/g, '');
+    return ADMIN_NUMBERS.includes(cleanPhone);
 }
 
 function getOwnNumber(sock) {
     return String(sock.user?.id || '')
         .split(':')[0]
-        .replace(/@.+$/, '')
+        .replace(/[^0-9]/g, '')
         .trim();
 }
 
@@ -99,16 +101,8 @@ function getGreetingReply(text) {
     const isId = detectLanguage(text) === 'id';
 
     return isId
-        ? `Halo 👋
-
-Selamat datang di *Customer Service Eyre Hypercon*.
-
-Ada yang bisa kami bantu hari ini?`
-        : `Hello 👋
-
-Welcome to *Eyre Hypercon Customer Service*.
-
-How can we help you today?`;
+        ? `Halo 👋\n\nSelamat datang di *Customer Service Eyre Hypercon*.\n\nAda yang bisa kami bantu hari ini?`
+        : `Hello 👋\n\nWelcome to *Eyre Hypercon Customer Service*.\n\nHow can we help you today?`;
 }
 
 function getPhoneFromJid(jid, msg) {
@@ -117,18 +111,18 @@ function getPhoneFromJid(jid, msg) {
     const raw = String(jid)
         .split('@')[0]
         .split(':')[0]
+        .replace(/[^0-9]/g, '')
         .trim();
 
     const participant = String(msg?.key?.participant || '')
         .split('@')[0]
         .split(':')[0]
+        .replace(/[^0-9]/g, '')
         .trim();
 
     const candidates = [participant, raw].filter(Boolean);
 
     for (const candidate of candidates) {
-        if (!/^\\d+$/.test(candidate)) continue;
-
         if (candidate.length >= 10 && candidate.length <= 15) {
             return candidate;
         }
@@ -137,21 +131,24 @@ function getPhoneFromJid(jid, msg) {
     return raw || '';
 }
 
+// FIX: Pengecekan penutup sesi harus EXACT MATCH (tidak boleh includes)
 function isEndSessionText(text) {
     const normalized = normalizeText(text);
 
-    const endKeywords = [
+    const exactEndKeywords = [
         'akhiri',
         'akhiri sesi',
         'end',
-        'done',
+        'end session',
+        'close',
+        'close session',
         'selesai',
-        'finish',
-        'close'
+        'finish'
     ];
 
-    return endKeywords.some(keyword => normalized.includes(keyword));
+    return exactEndKeywords.includes(normalized);
 }
+
 // ==================== STATE ====================
 function getCustomerState(phone) {
     if (!customerStates.has(phone)) {
@@ -178,11 +175,7 @@ function resetCustomerState(phone) {
 }
 
 function getSessionClosedReply() {
-    return `Terima kasih atas pertanyaannya.
-
-Semoga informasi yang diberikan membantu.
-
-✅ Bot kembali aktif dan siap membantu Anda.`;
+    return `Terima kasih atas pertanyaannya.\n\nSemoga informasi yang diberikan membantu.\n\n✅ Sesi admin telah diakhiri. Bot kembali aktif untuk membantu Anda.`;
 }
 
 // ==================== FALLBACK ====================
@@ -190,12 +183,8 @@ async function sendFallbackReply(sock, jid, text) {
     const isId = detectLanguage(text) === 'id';
 
     const fallback = isId
-        ? `Maaf, sistem sedang mengalami gangguan sementara.
-
-Saya belum bisa memproses pesan Anda saat ini.`
-        : `Sorry, the system is temporarily unavailable.
-
-I cannot process your message right now.`;
+        ? `Maaf, sistem sedang mengalami gangguan sementara.\n\nSaya belum bisa memproses pesan Anda saat ini.`
+        : `Sorry, the system is temporarily unavailable.\n\nI cannot process your message right now.`;
 
     await sock.sendMessage(jid, { text: fallback }).catch(() => {});
 }
@@ -218,146 +207,67 @@ function shouldOfferEscalationMenu(text, responseData) {
     return shouldEscalate || confidence < 50 || (weakSignal && confidence < 80);
 }
 
-function shouldShowEscalationMenu(text, phone) {
-    const state = getCustomerState(phone);
-
-    if (state.escalationMenuShown) return false;
-    if (isGreetingLike(text)) return false;
-    if (isDirectAdminRequest(text)) return false;
-
-    return true;
-}
-
-async function sendEscalationMenu(sock, jid, phone, text) {
-    const state = getCustomerState(phone);
-
-    if (state.escalationMenuShown) return;
-
-    const isId = detectLanguage(text) === 'id';
-
-    const prompt = isId
-        ? `Saya belum yakin bisa membantu sepenuhnya.
-
-Silakan pilih salah satu opsi berikut:
-
-1️⃣ Chat Admin
-2️⃣ Kirim Email ke *eyre.hypercon@gmail.com*
-
-Balas *1* untuk chat admin atau *2* untuk kirim email.`
-        : `I’m not fully sure I can help with this yet.
-
-Please choose one of the following options:
-
-1️⃣ Chat Admin
-2️⃣ Send Email to *eyre.hypercon@gmail.com*
-
-Reply *1* for admin chat or *2* for email.`;
-
-    state.escalationMenuShown = true;
-
-    await sock.sendMessage(jid, { text: prompt }).catch(() => {});
-}
-
 async function escalateToAdmin(sock, jid, phone, text, source = 'auto') {
     const state = getCustomerState(phone);
     const isId = detectLanguage(text) === 'id';
 
-    // aktifkan mode admin
+    // Aktifkan mode admin
     state.escalatedToAdmin = true;
     state.botPaused = true;
     state.sessionJid = jid;
 
     const reply = isId
-        ? `Anda sekarang terhubung dengan *Admin Eyre Hypercon*.
-
-Silakan sampaikan kebutuhan atau kendala Anda, dan tim kami akan membantu secepatnya.
-
-🛑 Selama sesi admin berlangsung, bot tidak akan memberikan balasan otomatis.
-
-Admin akan mengetik *akhiri* jika sesi sudah selesai.`
-        : `You are now connected with *Eyre Hypercon Admin*.
-
-Please describe your issue, and our team will assist you as soon as possible.
-
-🛑 During the admin session, the bot will not send automatic replies.
-
-The admin will type *end* when the session is finished.`;
+        ? `Anda sekarang terhubung dengan *Admin Eyre Hypercon*.\n\nSilakan sampaikan kebutuhan atau kendala Anda, dan tim kami akan membantu secepatnya.\n\n🛑 Selama sesi admin berlangsung, bot tidak akan memberikan balasan otomatis.\n\nAdmin akan mengetik *akhiri* jika sesi sudah selesai.`
+        : `You are now connected with *Eyre Hypercon Admin*.\n\nPlease describe your issue, and our team will assist you as soon as possible.\n\n🛑 During the admin session, the bot will not send automatic replies.\n\nThe admin will type *end* when the session is finished.`;
 
     await sock.sendMessage(jid, { text: reply }).catch(() => {});
 }
 
 // ==================== END SESSION ====================
-async function tryEndAdminSession(sock, jid, phone, text, fromMe) {
-
-    // hanya pesan dari device sendiri (admin)
-    if (!fromMe) return false;
-
-    // ambil nomor WA bot sendiri
-    const ownNumber = getOwnNumber(sock);
-
-    // pastikan nomor bot termasuk admin
-    if (!isAdminNumber(ownNumber)) {
-        console.log('❌ Own number is not registered as admin:', ownNumber);
-        return false;
-    }
-
+async function tryEndAdminSession(sock, jid, customerPhone, text, msg) {
     const normalized = normalizeText(text);
 
-    // cek kata penutup sesi
+    // 1. Cek apakah teks adalah kata penutup yang valid
     if (!isEndSessionText(normalized)) {
         return false;
     }
 
-    // cari customer yang sedang ditangani admin
-    let targetPhone = null;
-    let targetState = null;
+    const state = getCustomerState(customerPhone);
 
-    for (const [customerPhone, state] of customerStates.entries()) {
-
-        if (
-            state.escalatedToAdmin &&
-            state.botPaused &&
-            normalizeText(state.sessionJid || '') === normalizeText(jid || '')
-        ) {
-            targetPhone = customerPhone;
-            targetState = state;
-            break;
-        }
-    }
-
-    if (!targetState) {
-        console.log('⚠ Tidak ada sesi admin yang aktif');
+    // 2. Pastikan pelanggan memang sedang dalam mode admin
+    if (!state.escalatedToAdmin || !state.botPaused) {
         return false;
     }
 
-    // aktifkan kembali bot
-    targetState.botPaused = false;
-    targetState.escalatedToAdmin = false;
-    targetState.sessionJid = '';
-    targetState.escalationMenuShown = false;
-    targetState.menuShown = false;
+    // 3. Hanya PERINTAH DARI ADMIN / DEVICE BOT yang boleh mengakhiri sesi
+    const fromMe = Boolean(msg.key?.fromMe);
+    const senderPhone = getPhoneFromJid(msg.key?.participant || jid, msg);
+    const ownNumber = getOwnNumber(sock);
+
+    const isSenderAdmin = fromMe || isAdminNumber(senderPhone) || isAdminNumber(ownNumber);
+
+    if (!isSenderAdmin) {
+        return false;
+    }
+
+    // Reset State Pelanggan
+    resetCustomerState(customerPhone);
 
     await sock.sendMessage(jid, {
         text: getSessionClosedReply()
     }).catch(() => {});
 
-    console.log(`🔓 Session customer ${targetPhone} diakhiri oleh admin ${ownNumber}`);
+    console.log(`🔓 Sesi pelanggan ${customerPhone} diakhiri oleh Admin (${senderPhone || ownNumber})`);
 
     return true;
 }
 
 // ==================== BUTTON / MENU HANDLER ====================
-async function handleButtonChoice(sock, jid, phone, text, fromMe) {
-
+async function handleButtonChoice(sock, jid, phone, text) {
     const normalized = normalizeText(text);
     const state = getCustomerState(phone);
 
-    // admin bisa mengakhiri sesi
-    if (await tryEndAdminSession(sock, jid, phone, text, fromMe)) {
-        return true;
-    }
-
-    // pilihan chat admin
+    // PILIH CHAT ADMIN
     const isAdminChoice =
         state.escalationMenuShown &&
         (
@@ -369,12 +279,12 @@ async function handleButtonChoice(sock, jid, phone, text, fromMe) {
 
     if (isAdminChoice) {
         state.escalationMenuShown = false;
-
         await escalateToAdmin(sock, jid, phone, text, 'admin_choice');
+        console.log(`👨‍💻 Customer ${phone} masuk mode admin`);
         return true;
     }
 
-    // pilihan email
+    // PILIH EMAIL
     const isEmailChoice =
         state.escalationMenuShown &&
         (
@@ -387,21 +297,12 @@ async function handleButtonChoice(sock, jid, phone, text, fromMe) {
 
     if (isEmailChoice) {
         state.escalationMenuShown = false;
-
         const isId = detectLanguage(text) === 'id';
 
         await sock.sendMessage(jid, {
             text: isId
-                ? `Silakan kirim email ke:
-
-📧 *eyre.hypercon@gmail.com*
-
-Tim kami akan merespons secepat mungkin.`
-                : `Please send an email to:
-
-📧 *eyre.hypercon@gmail.com*
-
-Our team will respond as soon as possible.`
+                ? `Silakan kirim email ke:\n\n📧 *eyrehypercon@gmail.com*\n\nTim kami akan merespons secepat mungkin.`
+                : `Please send an email to:\n\n📧 *eyrehypercon@gmail.com*\n\nOur team will respond as soon as possible.`
         }).catch(() => {});
 
         return true;
@@ -409,10 +310,10 @@ Our team will respond as soon as possible.`
 
     return false;
 }
-async function startBot() {
 
-    const { state, saveCreds } =
-        await useMultiFileAuthState('session');
+// ==================== MAIN BOT ====================
+async function startBot() {
+    const { state, saveCreds } = await useMultiFileAuthState('session');
 
     const sock = makeWASocket({
         auth: state,
@@ -424,12 +325,11 @@ async function startBot() {
 
     sock.ev.on('creds.update', saveCreds);
 
-    // ==================== CONNECTION ====================
+    // CONNECTION
     sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
-
         if (qr) {
             console.clear();
-            console.log('Scan QR berikut:\\n');
+            console.log('Scan QR berikut:\n');
             QRCode.generate(qr, { small: true });
         }
 
@@ -444,35 +344,26 @@ async function startBot() {
         }
 
         if (connection === 'close') {
-
-            const reason =
-                lastDisconnect?.error instanceof Boom
-                    ? lastDisconnect.error.output.statusCode
-                    : 0;
+            const reason = lastDisconnect?.error instanceof Boom
+                ? lastDisconnect.error.output.statusCode
+                : 0;
 
             console.log('❌ Disconnected:', reason);
 
             if (reason !== DisconnectReason.loggedOut) {
-
                 console.log('🔄 Reconnecting...');
-
                 setTimeout(() => {
                     startBot();
                 }, 3000);
-
             } else {
-
                 console.log('⚠ Session logout, scan QR lagi.');
-
             }
         }
     });
 
-    // ==================== MESSAGE HANDLER ====================
+    // MESSAGE HANDLER
     sock.ev.on('messages.upsert', async (event) => {
-
         try {
-
             const msg = event.messages?.[0];
 
             if (!msg || !msg.message) return;
@@ -482,7 +373,7 @@ async function startBot() {
 
             if (!jid) return;
 
-            // skip group & broadcast
+            // Skip grup & broadcast
             if (jid.endsWith('@g.us') || jid.endsWith('@broadcast')) {
                 return;
             }
@@ -490,89 +381,65 @@ async function startBot() {
             const phone = getPhoneFromJid(jid, msg);
             const name = msg.pushName || 'Customer';
 
-            // ambil isi pesan
+            // Ambil teks pesan
             let text = '';
-
             if (msg.message.conversation) {
                 text = msg.message.conversation;
-            }
-            else if (msg.message.extendedTextMessage) {
+            } else if (msg.message.extendedTextMessage) {
                 text = msg.message.extendedTextMessage.text;
-            }
-            else if (msg.message.imageMessage) {
+            } else if (msg.message.imageMessage) {
                 text = msg.message.imageMessage.caption || '';
-            }
-            else if (msg.message.videoMessage) {
+            } else if (msg.message.videoMessage) {
                 text = msg.message.videoMessage.caption || '';
-            }
-            else if (msg.message.buttonsResponseMessage) {
+            } else if (msg.message.buttonsResponseMessage) {
                 text = msg.message.buttonsResponseMessage.selectedButtonId;
-            }
-            else if (msg.message.listResponseMessage) {
-                text =
-                    msg.message.listResponseMessage
-                        .singleSelectReply
-                        ?.selectedRowId || '';
+            } else if (msg.message.listResponseMessage) {
+                text = msg.message.listResponseMessage.singleSelectReply?.selectedRowId || '';
             }
 
             text = text.trim();
-
             if (!text) return;
 
-            console.log('\\n==============================');
+            console.log('\n==============================');
             console.log('📩 Pesan Masuk');
             console.log('Nama  :', name);
             console.log('Phone :', phone);
             console.log('Pesan :', text);
             console.log('==============================');
 
-            const state = getCustomerState(phone);
-
-            // greeting reset state
-            if (isGreetingLike(text)) {
-                resetCustomerState(phone);
-            }
-
-            // admin mengakhiri sesi
-            const endedSession = await tryEndAdminSession(
-                sock,
-                jid,
-                phone,
-                text,
-                fromMe
-            );
-
+            // Cek jika ini instruksi penutupan sesi dari Admin
+            const endedSession = await tryEndAdminSession(sock, jid, phone, text, msg);
             if (endedSession) {
                 return;
             }
 
-            // pesan dari admin / bot sendiri jangan diproses
+            const state = getCustomerState(phone);
+
+            // Jika dalam mode admin -> Bot diam total
+            if (state.botPaused) {
+                console.log(`🤫 Bot paused untuk ${phone} (Sesi Admin Aktif)`);
+                return;
+            }
+
+            // Abaikan pesan yang dikirim oleh device sendiri (kecuali instruksi penutup di atas)
             if (fromMe) {
                 return;
             }
 
-            // MODE ADMIN = BOT DIAM TOTAL
-            if (state.botPaused) {
-                console.log(`🤫 Bot paused for ${phone}`);
-                return;
+            // Reset state jika greeting
+            if (isGreetingLike(text)) {
+                resetCustomerState(phone);
             }
 
-            // cek pilihan menu
-            const buttonHandled = await handleButtonChoice(
-                sock,
-                jid,
-                phone,
-                text,
-                fromMe
-            );
-
+            // Cek pilihan menu (1 / 2)
+            const buttonHandled = await handleButtonChoice(sock, jid, phone, text);
             if (buttonHandled) {
                 return;
             }
 
             await sock.sendPresenceUpdate('composing', jid).catch(() => {});
 
-            // greeting
+            // Respon Greeting
             if (isGreetingLike(text)) {
                 await sock.sendMessage(jid, {
                     text: getGreetingReply(text)
@@ -580,17 +447,15 @@ async function startBot() {
                 return;
             }
 
-            // minta admin langsung
+            // Minta admin langsung
             if (isDirectAdminRequest(text)) {
                 await escalateToAdmin(sock, jid, phone, text, 'admin_request');
                 return;
             }
 
-            // ==================== CALL LARAVEL ====================
+            // CALL API LARAVEL
             let response;
-
             try {
-
                 response = await axios.post(
                     'http://127.0.0.1:8000/api/chat',
                     {
@@ -602,50 +467,34 @@ async function startBot() {
                         timeout: 15000
                     }
                 );
-
             } catch (err) {
-
-                console.log('\\n===== BACKEND TIMEOUT / ERROR =====');
+                console.log('\n===== BACKEND TIMEOUT / ERROR =====');
                 console.log(err?.message || err);
 
                 await sock.sendPresenceUpdate('paused', jid).catch(() => {});
-
                 await sendFallbackReply(sock, jid, text);
-                await sendEscalationMenu(sock, jid, phone, text);
-
                 return;
             }
 
-            console.log('\\nLaravel Reply:');
+            console.log('\nLaravel Reply:');
             console.log(response.data.reply);
 
             await sock.sendPresenceUpdate('paused', jid).catch(() => {});
 
-            const botReply =
-                response?.data?.reply ||
-                'Maaf, saya belum bisa memproses permintaan Anda saat ini.';
+            const botReply = response?.data?.reply || 'Maaf, saya belum bisa memproses permintaan Anda saat ini.';
 
-            await sock.sendMessage(jid, {
-                text: botReply
-            });
+            // Kirim balasan dari Laravel
+            await sock.sendMessage(jid, { text: botReply });
 
-            // tawarkan admin jika confidence rendah
-            const shouldEscalate =
-                shouldOfferEscalationMenu(text, response?.data);
-
-            if (
-                shouldEscalate &&
-                shouldShowEscalationMenu(text, phone)
-            ) {
-                await sendEscalationMenu(sock, jid, phone, text);
+            // FIX: Cukup tandai state TANPA mengirim pesan menu kedua kali secara otomatis
+            if (shouldOfferEscalationMenu(text, response?.data)) {
+                state.escalationMenuShown = true;
             }
 
             console.log('✅ Reply berhasil dikirim');
 
         } catch (err) {
-
-            console.log('\\n===== ERROR =====');
-
+            console.log('\n===== ERROR =====');
             if (err.response) {
                 console.log(err.response.data);
             } else {

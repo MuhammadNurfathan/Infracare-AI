@@ -338,8 +338,8 @@ class ChatService implements ChatServiceInterface
         $language = $this->detectLanguage($message);
 
         return $language === 'english'
-            ? "I can help you connect to an admin. Please choose one option:\n1) Chat Admin\n2) Send Email to eyre.hypercon@gmail.com"
-            : "Saya bisa membantu mengarahkan Anda ke admin. Silakan pilih opsi berikut:\n1) Chat Admin\n2) Kirim Email ke eyre.hypercon@gmail.com";
+            ? "I can help you connect to an admin. Please choose one option:\n1) Chat Admin\n2) Send Email to eyrehypercon@gmail.com"
+            : "Saya bisa membantu mengarahkan Anda ke admin. Silakan pilih opsi berikut:\n1) Chat Admin\n2) Kirim Email ke eyrehypercon@gmail.com";
     }
 
     private function buildEscalationReply(string $message): string
@@ -347,8 +347,8 @@ class ChatService implements ChatServiceInterface
         $language = $this->detectLanguage($message);
 
         return $language === 'english'
-            ? "I’m not fully sure I can answer this from the available knowledge yet. Please choose one option:\n1) Chat Admin\n2) Send Email to eyre.hypercon@gmail.com"
-            : "Saya belum yakin bisa menjawab pertanyaan ini sepenuhnya dari pengetahuan yang tersedia saat ini. Silakan pilih opsi berikut:\n1) Chat Admin\n2) Kirim Email ke eyre.hypercon@gmail.com";
+            ? "I’m not fully sure I can answer this from the available knowledge yet. Please choose one option:\n1) Chat Admin\n2) Send Email to eyrehypercon@gmail.com"
+            : "Saya belum yakin bisa menjawab pertanyaan ini sepenuhnya dari pengetahuan yang tersedia saat ini. Silakan pilih opsi berikut:\n1) Chat Admin\n2) Kirim Email ke eyrehypercon@gmail.com";
     }
 
     private function detectLanguage(string $text): string

@@ -26,7 +26,7 @@
 
                         <a href="{{ route('documents.create') }}"
                             class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded">
-                            Upload Manual
+                            Upload Manual Book
                         </a>
 
                     </div>
@@ -73,31 +73,25 @@
                                         {{ strtoupper($document->file_type) }}
                                     </td>
 
-                                    <td class="border px-3 py-2">
-<a href="{{ route('documents.show', $document) }}"
-   class="bg-green-500 hover:bg-green-600 text-white px-3 py-1 rounded">
+                                   <td class="border px-3 py-2 text-center">
+    <div class="flex justify-center items-center gap-2">
+        <a href="{{ route('documents.show', $document) }}"
+           class="bg-green-500 hover:bg-green-600 text-white px-3 py-1 rounded">
+            View
+        </a>
 
-    View
+        <form action="{{ route('documents.destroy', $document) }}" method="POST">
+            @csrf
+            @method('DELETE')
 
-</a>
-                                        <form
-                                            action="{{ route('documents.destroy',$document) }}"
-                                            method="POST">
-
-                                            @csrf
-                                            @method('DELETE')
-
-                                            <button
-                                                onclick="return confirm('Hapus manual book ini?')"
-                                                class="bg-red-500 hover:bg-red-600 text-white px-3 py-1 rounded">
-
-                                                Delete
-
-                                            </button>
-
-                                        </form>
-
-                                    </td>
+            <button type="submit"
+                    onclick="return confirm('Hapus manual book ini?')"
+                    class="bg-red-500 hover:bg-red-600 text-white px-3 py-1 rounded">
+                Delete
+            </button>
+        </form>
+    </div>
+</td>
 
                                 </tr>
 

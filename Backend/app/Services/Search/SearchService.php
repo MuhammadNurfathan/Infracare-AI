@@ -60,6 +60,8 @@ class SearchService implements SearchServiceInterface
         '/Error!\s*No text of specified style in document\.?/iu',
         '/Issue\s*\d+\s*\(\d{4}-\d{2}-\d{2}\)/iu',
         '/Copyright\s*©[^\n]*/iu',
+        // Table-of-contents dot leaders, e.g. "Cloning Template Cross-Site ..... 445"
+        '/\.{4,}\s*\d+/u',
     ];
 
     /**
@@ -219,11 +221,49 @@ class SearchService implements SearchServiceInterface
      */
     private function scoreChunk(KnowledgeChunk $chunk, string $normalizedQuestion, array $keywords, array $phrases): int
     {
-        $text = mb_strtolower((string) ($chunk->content ?? ''));
+        $rawContent = (string) ($chunk->content ?? '');
+        $text = mb_strtolower($rawContent);
         $title = mb_strtolower((string) ($chunk->document?->title ?? ''));
+
+        // A table-of-contents entry can literally contain the section title the
+        // question is asking about (e.g. "Cloning Template Cross-Site ..... 445"),
+        // which would otherwise win the "exact phrase match" bonus below despite
+        // having zero actual instructional content. Disqualify it outright.
+        // (Kept as a safety net for older/legacy chunks — new uploads no
+        // longer produce ToC chunks at all, see DocumentService.)
+        if ($this->looksLikeTableOfContents($text)) {
+            return 0;
+        }
 
         $score = 0;
         $matched = 0;
+
+        // Chunks now always start with their own section heading line (e.g.
+        // "3.1.2.5.2 Renaming Tag") — a match here is a much stronger signal
+        // than the same words appearing somewhere in the body, since it means
+        // this chunk IS about that topic, not just mentions it in passing.
+        $headingText = mb_strtolower($this->extractHeadingTitle($rawContent));
+
+        if ($headingText !== '') {
+            if ($normalizedQuestion !== '' && str_contains($headingText, $normalizedQuestion)) {
+                $score += 260;
+                $matched += 3;
+            }
+
+            foreach ($phrases as $phrase) {
+                if (str_contains($headingText, $phrase)) {
+                    $score += 120;
+                    $matched++;
+                }
+            }
+
+            foreach ($keywords as $keyword) {
+                if ($keyword !== '' && str_contains($headingText, $keyword)) {
+                    $score += 90;
+                    $matched++;
+                }
+            }
+        }
 
         // Strong signal: the whole (normalized) question appears near-verbatim.
         if ($normalizedQuestion !== '' && str_contains($text, $normalizedQuestion)) {
@@ -280,6 +320,37 @@ class SearchService implements SearchServiceInterface
         return $score;
     }
 
+    /**
+     * Returns the title portion of a chunk's own heading line (e.g. "Renaming
+     * Tag" from "3.1.2.5.2 Renaming Tag"), or '' if the chunk doesn't start
+     * with a recognizable numbered heading — e.g. legacy chunks from before
+     * the heading-based chunking, or the fixed-size-chunking fallback.
+     */
+    private function extractHeadingTitle(string $content): string
+    {
+        $firstLine = trim(explode("\n", trim($content), 2)[0] ?? '');
+
+        if (preg_match('/^\d{1,2}(?:\.\d{1,3}){1,6}\s+(.+)$/u', $firstLine, $matches) === 1) {
+            return trim($matches[1]);
+        }
+
+        return '';
+    }
+
+    private function looksLikeTableOfContents(string $text): bool
+    {
+        // Dot-leader entries like "3.1.4.1.5 Cloning Template Cross-Site ..... 445".
+        // Document chunking splits on sentence-ending punctuation, and the dots
+        // in a dot-leader get read as sentence terminators — so each contents
+        // line usually ends up alone in its own chunk with exactly ONE
+        // dot-leader match. Ordinary prose essentially never contains 4+
+        // consecutive dots followed by a number, so even one match is a
+        // reliable signal this chunk is a contents/index line, not body text.
+        $dotLeaderCount = preg_match_all('/\.{4,}\s*\d+/u', $text);
+
+        return $dotLeaderCount !== false && $dotLeaderCount >= 1;
+    }
+
     private function expandKeywords(array $keywords): array
     {
         $expanded = [];
@@ -291,7 +362,7 @@ class SearchService implements SearchServiceInterface
                 $expanded = array_merge($expanded, self::SYNONYMS[$keyword]);
             }
 
-            if (str_ends_with($keyword, 's')) {
+            if (str_ends_with($keyword, 's') && !str_ends_with($keyword, 'ss')) {
                 $expanded[] = substr($keyword, 0, -1);
             }
         }
@@ -302,7 +373,7 @@ class SearchService implements SearchServiceInterface
         )));
     }
 
-    private function buildContextWindow(KnowledgeChunk $target, int $radius = 3): string
+    private function buildContextWindow(KnowledgeChunk $target, int $radius = 4): string
     {
         $documentChunks = $this->documentChunkCache[$target->document_id]
             ??= KnowledgeChunk::query()
@@ -318,6 +389,8 @@ class SearchService implements SearchServiceInterface
             return (string) ($target->content ?? '');
         }
 
+        $targetHeading = $this->extractHeadingTitle((string) ($target->content ?? ''));
+
         $start = max(0, $index - $radius);
         $end = min($documentChunks->count() - 1, $index + $radius);
 
@@ -325,6 +398,23 @@ class SearchService implements SearchServiceInterface
         foreach ($documentChunks->slice($start, ($end - $start) + 1) as $chunk) {
             $chunkId = (int) $chunk->id;
             $isTarget = $chunkId === (int) $target->id;
+
+            if (!$isTarget) {
+                // Only pull in a neighbor if it's a continuation piece of the
+                // SAME section (a long section that DocumentService had to
+                // split into multiple parts, each re-prefixed with the same
+                // heading) — not just because it happens to sit next to the
+                // target chunk. Two different sections back-to-back in the
+                // manual are usually unrelated topics, and merging them back
+                // in is exactly what caused irrelevant neighboring sections
+                // (e.g. an unrelated Watchdog paragraph) to bleed into an
+                // otherwise-correct answer.
+                $neighborHeading = $this->extractHeadingTitle((string) ($chunk->content ?? ''));
+
+                if ($targetHeading === '' || $neighborHeading !== $targetHeading) {
+                    continue;
+                }
+            }
 
             // Skip neighbor chunks another (higher-ranked) result already
             // pulled in — always keep the target itself, since that's the
@@ -342,7 +432,7 @@ class SearchService implements SearchServiceInterface
             $this->includedChunkIds[$chunkId] = true;
         }
 
-        return mb_substr(implode("\n\n", $contextParts), 0, 6000);
+        return mb_substr(implode("\n\n", $contextParts), 0, 9000);
     }
 
     private function stripNoise(string $text): string

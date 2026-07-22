@@ -178,6 +178,14 @@ function getSessionClosedReply() {
     return `Terima kasih atas pertanyaannya.\n\nSemoga informasi yang diberikan membantu.\n\n✅ Sesi admin telah diakhiri. Bot kembali aktif untuk membantu Anda.`;
 }
 
+function getWaitingReply(text) {
+    const isId = detectLanguage(text) === 'id';
+
+    return isId
+        ? `Mohon tunggu sebentar, jawaban dari pertanyaan Anda sedang dicari...`
+        : `Please wait a moment, your answer is being searched...`;
+}
+
 // ==================== FALLBACK ====================
 async function sendFallbackReply(sock, jid, text) {
     const isId = detectLanguage(text) === 'id';
@@ -437,13 +445,13 @@ async function startBot() {
                 return;
             }
 
-            await sock.sendPresenceUpdate('composing', jid).catch(() => {});
-
             // Respon Greeting
             if (isGreetingLike(text)) {
+                await sock.sendPresenceUpdate('composing', jid).catch(() => {});
                 await sock.sendMessage(jid, {
                     text: getGreetingReply(text)
                 }).catch(() => {});
+                await sock.sendPresenceUpdate('paused', jid).catch(() => {});
                 return;
             }
 
@@ -452,6 +460,11 @@ async function startBot() {
                 await escalateToAdmin(sock, jid, phone, text, 'admin_request');
                 return;
             }
+
+            await sock.sendPresenceUpdate('composing', jid).catch(() => {});
+            await sock.sendMessage(jid, {
+                text: getWaitingReply(text)
+            }).catch(() => {});
 
             // CALL API LARAVEL
             let response;
@@ -464,27 +477,26 @@ async function startBot() {
                         message: text
                     },
                     {
-                        timeout: 15000
+                        timeout: 360000
                     }
                 );
             } catch (err) {
                 console.log('\n===== BACKEND TIMEOUT / ERROR =====');
                 console.log(err?.message || err);
 
-                await sock.sendPresenceUpdate('paused', jid).catch(() => {});
                 await sendFallbackReply(sock, jid, text);
+                await sock.sendPresenceUpdate('paused', jid).catch(() => {});
                 return;
             }
 
             console.log('\nLaravel Reply:');
             console.log(response.data.reply);
 
-            await sock.sendPresenceUpdate('paused', jid).catch(() => {});
-
             const botReply = response?.data?.reply || 'Maaf, saya belum bisa memproses permintaan Anda saat ini.';
 
             // Kirim balasan dari Laravel
             await sock.sendMessage(jid, { text: botReply });
+            await sock.sendPresenceUpdate('paused', jid).catch(() => {});
 
             // FIX: Cukup tandai state TANPA mengirim pesan menu kedua kali secara otomatis
             if (shouldOfferEscalationMenu(text, response?.data)) {

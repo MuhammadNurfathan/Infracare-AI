@@ -206,12 +206,14 @@ class ChatService implements ChatServiceInterface
         // answers that jump between unrelated topics.
         $selected = $relevant->isNotEmpty() ? $relevant : $ranked->take(1);
 
-        $merged = $selected
+        $cleaned = $selected
             ->take(3)
             ->map(fn ($chunk) => $this->cleanRawChunk($chunk))
             ->filter(fn ($chunk) => $chunk !== '')
             ->unique()
-            ->implode("\n\n");
+            ->values();
+
+        $merged = $this->mergeChunksDeduplicatingHeadings($cleaned);
 
         return $this->truncateAtSentence($merged, 1600);
     }
@@ -251,11 +253,85 @@ class ChatService implements ChatServiceInterface
         $text = trim($chunk);
         $text = preg_replace('/\[Chunk\s*\d+\]\s*/i', '', $text) ?? $text;
         $text = preg_replace('/\b(?:Step|Langkah)\s+(\d+)\s*[:.]?\s*/iu', "\n" . '$1. ', $text) ?? $text;
+
+        // The source manuals use "⚫" as their bullet glyph (alongside the
+        // occasional "•"). Neither was being put on its own line before, so
+        // a run of bullet points like "⚫ You have logged in... ⚫ The HA
+        // configuration..." rendered as one run-on sentence. Normalize both
+        // to a plain "- " bullet and force each one onto a new line.
+        $text = preg_replace('/(?<!\n)[⚫•]\s*/u', "\n- ", $text) ?? $text;
+        $text = preg_replace('/^[⚫•]\s*/mu', '- ', $text) ?? $text;
+
         $text = preg_replace('/[ \t]+/', ' ', $text) ?? $text;
         $text = preg_replace('/(?<!\n)(\d+\.\s)/u', "\n$1", $text) ?? $text;
+
+        // Drop stray page-number-only lines (e.g. a lone "141") that leak in
+        // when a page break lands in the middle of a section — the running
+        // header/footer stripping in DocumentService doesn't catch every
+        // layout variant, so this is a defensive second pass at merge time.
+        $lines = preg_split('/\n/', $text) ?: [$text];
+        $lines = array_values(array_filter(
+            $lines,
+            fn ($line) => preg_match('/^\d{1,4}$/', trim($line)) !== 1
+        ));
+        $text = implode("\n", $lines);
+
         $text = preg_replace('/\n{2,}/', "\n\n", $text) ?? $text;
 
         return trim($text);
+    }
+
+    /**
+     * Returns the title portion of a chunk's own heading line (e.g. "Renaming
+     * Tag" from "3.1.2.5.2 Renaming Tag"), or '' if the chunk doesn't start
+     * with a recognizable numbered heading. Mirrors SearchService's own
+     * extraction so a merged reply can tell whether two chunks belong to the
+     * same section.
+     */
+    private function extractHeadingTitle(string $content): string
+    {
+        $firstLine = trim(explode("\n", trim($content), 2)[0] ?? '');
+
+        if (preg_match('/^\d{1,2}(?:\.\d{1,3}){1,6}\s+(.+)$/u', $firstLine, $matches) === 1) {
+            return trim($matches[1]);
+        }
+
+        return '';
+    }
+
+    /**
+     * Merges already-cleaned chunks into one block of text, but drops a
+     * repeated section heading when consecutive chunks are continuation
+     * parts of the SAME section (produced by DocumentService's long-section
+     * splitting, which re-prefixes every part with the same heading). Without
+     * this, merging those parts back together in a reply shows the section
+     * title twice — e.g. "3.1.2.1.2.3.4 Installing Ubuntu OS (ARM)" appearing
+     * once before the intro and again before a later "Step 8".
+     */
+    private function mergeChunksDeduplicatingHeadings($chunks): string
+    {
+        $seenHeadings = [];
+        $parts = [];
+
+        foreach ($chunks as $chunk) {
+            $chunk = (string) $chunk;
+            $heading = $this->extractHeadingTitle($chunk);
+
+            if ($heading !== '' && isset($seenHeadings[$heading])) {
+                $lines = preg_split('/\n/', trim($chunk), 2) ?: [$chunk];
+                $body = trim($lines[1] ?? '');
+                $parts[] = $body !== '' ? $body : $chunk;
+                continue;
+            }
+
+            if ($heading !== '') {
+                $seenHeadings[$heading] = true;
+            }
+
+            $parts[] = $chunk;
+        }
+
+        return implode("\n\n", array_filter($parts, fn ($part) => trim((string) $part) !== ''));
     }
 
     /**
@@ -263,6 +339,16 @@ class ChatService implements ChatServiceInterface
      * from AIService, so only light, non-destructive cleanup is applied here —
      * this used to be 3 separate regex passes stacked on top of each other,
      * which is what was mangling the layout.
+     *
+     * FIX (layout bug): the old $forbiddenPhrases list included plain words
+     * like "section"/"sections"/"chunk"/"chunks" that also occur naturally
+     * inside real manual text (e.g. "...pada bagian keamanan router...").
+     * Blindly deleting those words out of a sentence left broken grammar,
+     * double spaces, and stray punctuation behind — especially in the raw
+     * context fallback path, which is verbatim manual text. Only multi-word
+     * meta-commentary phrases (things a model says about its own reasoning,
+     * never legitimate manual content) are stripped now, and any leftover
+     * punctuation/spacing from a removal is cleaned up afterward.
      */
     private function finalizeReply(string $reply, string $message, bool $isAiGenerated): string
     {
@@ -271,15 +357,23 @@ class ChatService implements ChatServiceInterface
         $reply = preg_replace('/\n{3,}/', "\n\n", $reply) ?? $reply;
 
         $forbiddenPhrases = [
-            'chunk', 'chunks', 'section', 'sections', 'i looked', 'i see information about',
-            'let me look', 'looking at the chunks', 'looking at the context',
+            'i looked', 'i see information about', 'let me look',
+            'looking at the chunks', 'looking at the context',
             'the context mentions', 'from the context', 'from the provided context',
             'based on the context',
         ];
 
         foreach ($forbiddenPhrases as $phrase) {
-            $reply = preg_replace('/\b' . preg_quote($phrase, '/') . '\b/i', '', $reply) ?? $reply;
+            // Also eat a trailing comma/space so removal doesn't leave the
+            // sentence starting with stray punctuation.
+            $reply = preg_replace('/\b' . preg_quote($phrase, '/') . '\b\s*,?\s*/i', '', $reply) ?? $reply;
         }
+
+        // Clean up any leftover punctuation/spacing left behind by the
+        // removals above (e.g. a line now starting with ", " or a dangling
+        // space before punctuation).
+        $reply = preg_replace('/^[ \t]*[,;:.]+[ \t]*/m', '', $reply) ?? $reply;
+        $reply = preg_replace('/[ \t]+([,.!?;:])/u', '$1', $reply) ?? $reply;
 
         $reply = preg_replace('/[ \t]{2,}/u', ' ', $reply) ?? $reply;
         $reply = preg_replace('/\n{2,}/', "\n\n", $reply) ?? $reply;
